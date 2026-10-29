@@ -9,10 +9,12 @@ Aplikacja Android do prezentowania zdjęć z podróży na tablecie/TV, z animacj
   - zmiana państwa → mapa świata z podświetlonym państwem (kafelki OSM + wyróżnienie granic GeoJSON), animowane przybliżenie na państwo, znacznik głównego punktu państwa, potem mapa lokalizacji zdjęcia,
   - to samo państwo, ale odległość od poprzedniego zdjęcia z GPS ≥ próg (domyślnie 5 km) → mapa lokalizacji,
   - odległość < próg lub brak GPS → samo zdjęcie (bez mapy).
-- **Muzyka wg państwa** (hybryda): własne pliki z wybranego folderu (podfoldery `PL`, `POL`, `Poland` lub `_default`); gdy brak plików, generowany jest instrumentalny podkład ambietowy (proceduralny WAV, unikatowy dla państwa).
-- **Sterowanie**: tap = pauza/wznowienie, pasek dolny: ▶/⏸, ⏭ następne, ⏮ poprzednie, replay bieżącego państwa, restart całości, ustawienia. Przesunięcie w lewo na zdjęciu = następne, w prawo = poprzednie.
+- **Muzyka wg państwa** (hybryda): własne pliki z wybranego folderu (podfoldery `PL`, `POL`, `Poland` lub `_default`) — start i każda zmiana państwa zaczynają od **losowego utworu** (playlista tasowana przy każdym uruchomieniu); gdy brak plików, generowany jest instrumentalny podkład ambietowy (proceduralny WAV, unikatowy dla państwa).
+- **Trasa między zdjęciami**: gdy oba zdjęcia mają GPS, odległość 1–`próg km` → mapa z trasą drogową wyznaczaną przez [OSRM](https://router.project-osrm.org) (z fallbackiem do linii prostej bez internetu), rysowana progresywnie (smoothstep) i przyspieszana tak, aby zawsze domknąć się w skonfigurowanym czasie mapy — na koniec animowane przybliżenie na cel.
+- **Przejście mapa↔zdjęcie**: płynny crossfade (czas regulowany w ustawieniach, 0.2–5 s).
+- **Sterowanie**: tap = pauza/wznowienie (obsługiwany też na mapie i zdjęciu), pasek dolny: ▶/⏸, ⏭ następne, ⏮ poprzednie, replay bieżącego państwa, restart całości, ustawienia. Przesunięcie w lewo na zdjęciu = następne, w prawo = poprzednie. Ustawienia dostępne zawsze (ikona w prawym górnym rogu).
 - **Zatrzymanie skanowania** w trakcie — do pokazu trafiają zdjęcia przeskanowane do tej pory.
-- **Opcje**: przerwa między zdjęciami, czas mapy lokalizacji, czas fazy „mapa świata”, próg dystansu (km), głośność, kolejność (od najstarszych/najnowszych), pomijanie zdjęć bez GPS.
+- **Opcje**: przerwa między zdjęciami, czas mapy lokalizacji, czas fazy „mapa świata”, próg dystansu (km), głośność, kolejność (od najstarszych/najnowszych), pomijanie zdjęć bez GPS, czas przejścia mapa↔zdjęcie.
 
 ## Wymagania
 
