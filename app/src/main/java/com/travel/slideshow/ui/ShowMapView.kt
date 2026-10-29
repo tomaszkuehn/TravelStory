@@ -53,7 +53,7 @@ fun ShowMap(
     modifier: Modifier = Modifier,
 ) {
     SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView ->
-        drawLocation(mapView, step.photo, pastRoutes, visitedPins, manual, onArrived)
+        drawLocation(mapView, step, pastRoutes, visitedPins, manual, onArrived)
     }
 }
 
@@ -275,12 +275,13 @@ private fun addVisitedPins(mapView: MapView, pins: List<PinState>) {
 
 private suspend fun drawLocation(
     mapView: MapView,
-    photo: PhotoItem,
+    step: ShowStep.LocationMap,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
     manual: () -> Boolean,
     onArrived: () -> Unit,
 ) {
+    val photo = step.photo
     val lat = photo.lat ?: return
     val lon = photo.lon ?: return
     clearOverlays(mapView)
@@ -297,6 +298,12 @@ private suspend fun drawLocation(
     )
     onArrived()
     waitManualHeld(manual)
+    if (step.revisit) {
+        mapView.controller.setZoom(15.5)
+        mapView.controller.setCenter(geo)
+        mapView.invalidate()
+        return
+    }
     mapView.controller.setZoom(4.0)
     mapView.controller.setCenter(geo)
     animateZoomDecel(mapView, geo, 15.5, 1700L, manual)

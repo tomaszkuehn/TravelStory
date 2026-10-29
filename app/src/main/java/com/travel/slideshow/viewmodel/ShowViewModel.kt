@@ -29,7 +29,7 @@ sealed interface ShowStep {
     data object Idle : ShowStep
     data class Scanning(val count: Int) : ShowStep
     data class WorldCountry(val country: CountryShape, val zoomedIn: Boolean) : ShowStep
-    data class LocationMap(val photo: PhotoItem) : ShowStep
+    data class LocationMap(val photo: PhotoItem, val revisit: Boolean = false) : ShowStep
     data class RouteMap(val from: PhotoItem, val photo: PhotoItem) : ShowStep
     data class Photo(val photo: PhotoItem) : ShowStep
     data object Finished : ShowStep
@@ -330,36 +330,55 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val photoMs = (cfg.photoDisplaySec * 1000).toLong().coerceAtLeast(600)
         val locMs = (cfg.locationMapSec * 1000).toLong().coerceAtLeast(1200)
         val worldMs = (cfg.worldMapSec * 1000).toLong().coerceAtLeast(2000)
+
+        val travelSteps = mutableListOf<MutableList<Segment>>()
+        val photoSegs = mutableListOf<MutableList<Segment>>()
+        val anchors = mutableListOf<PhotoItem?>()
+        travelSteps.add(mutableListOf())
+        photoSegs.add(mutableListOf())
+        anchors.add(null)
         var prevLat: Double? = null
         var prevLon: Double? = null
         var prevIso: String? = null
-        var prevPhoto: PhotoItem? = null
         for (p in filtered) {
-            var musicIso: String? = null
             if (p.lat != null && p.lon != null) {
                 val iso = p.iso3
+                var isTravel = false
                 if (iso != null && iso != prevIso) {
-                    musicIso = iso
                     val shape = WorldMapData.byIso(iso)
+                    travelSteps.add(mutableListOf())
                     if (shape != null) {
-                        segs += Segment(ShowStep.WorldCountry(shape, false), (worldMs * 0.35).toLong(), musicIso)
-                        segs += Segment(ShowStep.WorldCountry(shape, true), (worldMs * 0.65).toLong())
+                        travelSteps.last().add(Segment(ShowStep.WorldCountry(shape, false), (worldMs * 0.35).toLong(), iso))
+                        travelSteps.last().add(Segment(ShowStep.WorldCountry(shape, true), (worldMs * 0.65).toLong()))
                     }
-                    segs += Segment(ShowStep.LocationMap(p), locMs)
+                    travelSteps.last().add(Segment(ShowStep.LocationMap(p), locMs))
+                    isTravel = true
                 } else {
                     val d = if (prevLat != null && prevLon != null) {
                         Geo.haversineKm(prevLat, prevLon, p.lat, p.lon)
                     } else Double.MAX_VALUE
-                    if (d > ROUTE_MIN_KM && prevPhoto != null) {
-                        segs += Segment(ShowStep.RouteMap(prevPhoto!!, p), locMs)
+                    if (d > ROUTE_MIN_KM && anchors.last() != null) {
+                        travelSteps.add(mutableListOf(Segment(ShowStep.RouteMap(anchors.last()!!, p), locMs)))
+                        isTravel = true
                     }
+                }
+                if (isTravel) {
+                    photoSegs.add(mutableListOf())
+                    anchors.add(null)
                 }
                 prevLat = p.lat
                 prevLon = p.lon
-                prevPhoto = p
             }
-            segs += Segment(ShowStep.Photo(p), photoMs)
+            photoSegs.last().add(Segment(ShowStep.Photo(p), photoMs))
             if (p.iso3 != null) prevIso = p.iso3
+            if (p.lat != null && p.lon != null) anchors[anchors.size - 1] = p
+        }
+        for (i in 0 until travelSteps.size) {
+            segs += travelSteps[i]
+            segs += photoSegs[i]
+            if (i + 1 < travelSteps.size && anchors[i] != null && travelSteps[i + 1].isNotEmpty()) {
+                segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), locMs)
+            }
         }
         return segs
     }
