@@ -320,15 +320,6 @@ private suspend fun drawRoute(
         }
     )
 
-    var w = 180.0; var s = 90.0; var e = -180.0; var n = -90.0
-    for (p in full) {
-        w = minOf(w, p.longitude)
-        e = maxOf(e, p.longitude)
-        s = minOf(s, p.latitude)
-        n = maxOf(n, p.latitude)
-    }
-    val bb = BoundingBox(n, e, s, w)
-
     val startGeo = GeoPoint(aLat, aLon)
     mapView.controller.setZoom(14.2)
     mapView.controller.setCenter(startGeo)
