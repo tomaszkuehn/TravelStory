@@ -14,6 +14,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
+import com.travel.slideshow.model.PhotoItem
+import com.travel.slideshow.viewmodel.RouteState
 import com.travel.slideshow.viewmodel.ShowStep
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
@@ -27,34 +29,36 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
 @Composable
-fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, modifier) { mapView -> drawWorldCountry(mapView, step) }
+fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawWorldCountry(mapView, step, manual) }
 }
 
 @Composable
-fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, modifier) { mapView -> drawLocation(mapView, step.photo) }
+fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawLocation(mapView, step.photo, manual) }
 }
 
 @Composable
 fun ShowMap(
     step: ShowStep.RouteMap,
     routePts: List<List<Double>>?,
+    pastRoutes: List<RouteState>,
     totalSec: Float,
     runId: Int,
     onMapTap: () -> Unit,
     onGesture: () -> Unit,
+    manual: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
     val startedAt = remember(runId, step.photo.uri) { System.currentTimeMillis() }
-    SingleMapView(key, onMapTap, onGesture, modifier) {
-        mapView -> drawRoute(mapView, step, routePts, totalSec, System.currentTimeMillis() - startedAt)
+    SingleMapView(key, onMapTap, onGesture, manual, modifier) {
+        mapView -> drawRoute(mapView, step, routePts, pastRoutes, totalSec, System.currentTimeMillis() - startedAt, manual)
     }
 }
 
 @Composable
-private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier, effect: suspend (MapView) -> Unit) {
+private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView) -> Unit) {
     val context = LocalContext.current
     val tapHandler by rememberUpdatedState(onMapTap)
     val gestureHandler by rememberUpdatedState(onGesture)
@@ -111,7 +115,11 @@ private fun clearOverlays(mapView: MapView) {
     if (keepOverlay != null) mapView.overlays.add(keepOverlay)
 }
 
-private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCountry) {
+private suspend fun waitManualHeld(manual: () -> Boolean) {
+    while (manual()) kotlinx.coroutines.delay(80)
+}
+
+private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCountry, manual: () -> Boolean) {
     val country = step.country
     clearOverlays(mapView)
     for (ring in country.outerRings) {
@@ -128,12 +136,13 @@ private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCount
         val bbox = BoundingBox(
             country.bbox.north, country.bbox.east, country.bbox.south, country.bbox.west
         )
+        waitManualHeld(manual)
         mapView.zoomToBoundingBox(bbox, false)
         val fitZoom = (mapView.zoomLevelDouble - 0.4).coerceIn(2.5, 10.0)
         mapView.controller.setZoom(2.0)
         mapView.controller.setCenter(GeoPoint(15.0, 0.0))
         val center = bbox.centerWithDateLine
-        animateZoomDecel(mapView, GeoPoint(center.latitude, center.longitude), fitZoom, 1800L)
+        animateZoomDecel(mapView, GeoPoint(center.latitude, center.longitude), fitZoom, 1800L, manual)
         val (clat, clon) = country.mainPolyCentroid
         mapView.overlays.add(
             Marker(mapView).apply {
@@ -149,7 +158,7 @@ private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCount
     }
 }
 
-private suspend fun drawLocation(mapView: MapView, photo: com.travel.slideshow.model.PhotoItem) {
+private suspend fun drawLocation(mapView: MapView, photo: PhotoItem, manual: () -> Boolean) {
     val lat = photo.lat ?: return
     val lon = photo.lon ?: return
     clearOverlays(mapView)
@@ -161,18 +170,26 @@ private suspend fun drawLocation(mapView: MapView, photo: com.travel.slideshow.m
             title = (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: "")
         }
     )
+    waitManualHeld(manual)
     mapView.controller.setZoom(4.0)
     mapView.controller.setCenter(geo)
-    animateZoomDecel(mapView, geo, 15.5, 1700L)
+    animateZoomDecel(mapView, geo, 15.5, 1700L, manual)
     mapView.invalidate()
 }
 
-private suspend fun animateZoomDecel(mapView: MapView, target: GeoPoint, targetZoom: Double, durationMs: Long) {
+private suspend fun animateZoomDecel(
+    mapView: MapView,
+    target: GeoPoint,
+    targetZoom: Double,
+    durationMs: Long,
+    manual: () -> Boolean = { false },
+) {
     val startZoom = mapView.zoomLevelDouble
     val startLat = mapView.mapCenter.latitude
     val startLon = mapView.mapCenter.longitude
     val frames = (durationMs / 16).coerceAtLeast(1)
     for (i in 1..frames) {
+        if (manual()) return
         val t = i.toDouble() / frames
         val eased = 1 - Math.pow(1 - t, 3.0)
         mapView.controller.setZoom(startZoom + (targetZoom - startZoom) * eased)
@@ -188,8 +205,10 @@ private suspend fun drawRoute(
     mapView: MapView,
     step: ShowStep.RouteMap,
     routePts: List<List<Double>>?,
+    pastRoutes: List<RouteState>,
     totalSec: Float,
     elapsedMs: Long,
+    manual: () -> Boolean,
 ) {
     val from = step.from
     val to = step.photo
@@ -198,6 +217,17 @@ private suspend fun drawRoute(
     val bLat = to.lat ?: return
     val bLon = to.lon ?: return
     clearOverlays(mapView)
+
+    for (past in pastRoutes) {
+        if (past.uri == to.uri) continue
+        if (past.points.size < 2) continue
+        val faint = Polyline(mapView)
+        faint.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
+        faint.outlinePaint.color = 0x6690A4AE.toInt()
+        faint.outlinePaint.strokeWidth = 3.5f
+        faint.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+        mapView.overlays.add(faint)
+    }
 
     val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }
@@ -232,19 +262,31 @@ private suspend fun drawRoute(
         n = maxOf(n, p.latitude)
     }
     val bb = BoundingBox(n, e, s, w)
+
+    val startGeo = GeoPoint(aLat, aLon)
+    mapView.controller.setZoom(14.2)
+    mapView.controller.setCenter(startGeo)
+    mapView.invalidate()
+    waitManualHeld(manual)
+    kotlinx.coroutines.delay(300)
+
     mapView.zoomToBoundingBox(bb, false, 120)
+    val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 17.0)
+    val fitCenter = mapView.mapCenter
+    mapView.controller.setZoom(14.2)
+    mapView.controller.setCenter(startGeo)
     mapView.invalidate()
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
     val elapsed = elapsedMs.coerceAtLeast(0)
-    val budget = (totalMs - elapsed).coerceAtLeast(0)
-    val zoomMs = run {
-        val wanted = minOf(2200L, (totalMs * 0.35).toLong())
-        if (budget > wanted + 800) wanted else (budget - 300).coerceIn(400L, wanted)
-    }
-    val remainMs = (totalMs - elapsed - zoomMs)
+    val remaining = (totalMs - elapsed).coerceAtLeast(400)
+    val zoomOutMs = (remaining * 0.22).coerceIn(300.0, 2400.0).toLong()
+    val zoomInMs = (remaining * 0.24).coerceIn(400.0, 2400.0).toLong()
+    val drawMs = (remaining - zoomOutMs - zoomInMs).coerceAtLeast(0)
+
+    animateZoomDecel(mapView, GeoPoint(fitCenter.latitude, fitCenter.longitude), fitZoom, zoomOutMs, manual)
+
     if (full.size >= 2) {
-        val drawMs = remainMs.coerceAtLeast(0)
         val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {
             val t = i.toDouble() / steps
@@ -265,12 +307,20 @@ private suspend fun drawRoute(
                 )
             }
             line.setPoints(partial)
+            if (!manual()) {
+                val tip = partial.last()
+                val cLat = mapView.mapCenter.latitude
+                val cLon = mapView.mapCenter.longitude
+                mapView.controller.setCenter(
+                    GeoPoint(cLat + (tip.latitude - cLat) * 0.25, cLon + (tip.longitude - cLon) * 0.25)
+                )
+            }
             mapView.invalidate()
-            kotlinx.coroutines.delay(if (drawMs <= 0) 0 else drawMs / steps)
+            kotlinx.coroutines.delay(if (drawMs <= 0) 0L else drawMs / steps)
         }
         line.setPoints(full)
         mapView.invalidate()
     }
 
-    animateZoomDecel(mapView, GeoPoint(bLat, bLon), 15.5, zoomMs)
+    animateZoomDecel(mapView, GeoPoint(bLat, bLon), 15.5, zoomInMs, manual)
 }

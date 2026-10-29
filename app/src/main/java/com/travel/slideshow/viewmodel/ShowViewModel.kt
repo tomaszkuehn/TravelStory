@@ -50,6 +50,7 @@ data class UiState(
     val musicFolderName: String? = null,
     val message: String? = null,
     val route: RouteState? = null,
+    val pastRoutes: List<RouteState> = emptyList(),
     val runId: Int = 0,
 )
 
@@ -67,6 +68,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private val pausedGate = MutableStateFlow(false)
     private val manualGate = MutableStateFlow(false)
     private var gestureJob: kotlinx.coroutines.Job? = null
+    private val pastRoutesSet = HashSet<Uri>()
     private val stopScan = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastPhotos: List<PhotoItem> = emptyList()
     private var segments: List<Segment> = emptyList()
@@ -134,6 +136,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun restoreAfterSettings() {
         togglePause()
     }
+
+    val manualHold: StateFlow<Boolean> get() = manualGate
 
     fun onMapGesture() {
         manualGate.value = true
@@ -262,9 +266,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     fun prepare() {
         val root = _state.value.config.photoFolderUri ?: return
         stopScan.set(false)
+        pastRoutesSet.clear()
         viewModelScope.launch {
             message(null)
-            _state.value = _state.value.copy(step = ShowStep.Scanning(0))
+            _state.value = _state.value.copy(step = ShowStep.Scanning(0), pastRoutes = emptyList(), route = null)
             WorldMapData.load(getApplication())
             val items = repo.scan(
                 root,
@@ -355,22 +360,25 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
         "%.5f,%.5f|%.5f,%.5f".format(lat1, lon1, lat2, lon2)
 
-    private fun fetchRoute(stepIn: ShowStep.RouteMap) {
+    private suspend fun fetchRoute(stepIn: ShowStep.RouteMap) {
         val from = stepIn.from
         val to = stepIn.photo
         if (from.lat == null || from.lon == null || to.lat == null || to.lon == null) return
         val key = routeKey(from.lat, from.lon, to.lat, to.lon)
         val cached = routeCache[key]
-        if (cached != null) {
-            _state.value = _state.value.copy(route = RouteState(to.uri, cached))
-            return
-        }
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val pts = osrmRoute(from.lat, from.lon, to.lat, to.lon)
-                ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
-            routeCache[key] = pts
-            _state.value = _state.value.copy(route = RouteState(to.uri, pts))
-        }
+        val pts = cached ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            osrmRoute(from.lat, from.lon, to.lat, to.lon)
+        } ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
+        routeCache[key] = pts
+        addPastRoute(to.uri, pts)
+        _state.value = _state.value.copy(route = RouteState(to.uri, pts))
+    }
+
+    private fun addPastRoute(uri: Uri, pts: List<List<Double>>) {
+        val cur = _state.value
+        if (cur.pastRoutes.any { it.uri == uri } || uri in pastRoutesSet) return
+        pastRoutesSet.add(uri)
+        _state.value = cur.copy(pastRoutes = cur.pastRoutes + RouteState(uri, pts))
     }
 
     private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
