@@ -210,10 +210,13 @@ private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCount
             country.bbox.north, country.bbox.east, country.bbox.south, country.bbox.west
         )
         waitManualHeld(manual)
+        mapView.visibility = android.view.View.INVISIBLE
         mapView.zoomToBoundingBox(bbox, false)
         val fitZoom = (mapView.zoomLevelDouble - 0.4).coerceIn(2.5, 10.0)
         mapView.controller.setZoom(2.0)
         mapView.controller.setCenter(GeoPoint(15.0, 0.0))
+        mapView.visibility = android.view.View.VISIBLE
+        mapView.invalidate()
         val center = bbox.centerWithDateLine
         animateZoomDecel(mapView, GeoPoint(center.latitude, center.longitude), fitZoom, 1800L, manual)
         val (clat, clon) = country.mainPolyCentroid
@@ -381,11 +384,12 @@ private suspend fun drawRoute(
     waitManualHeld(manual)
     if (routePts == null) return
 
+    mapView.visibility = android.view.View.INVISIBLE
     mapView.zoomToBoundingBox(bb, false, 120)
     val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 15.5)
-    val fitCenter = mapView.mapCenter
     mapView.controller.setZoom(15.5)
     mapView.controller.setCenter(startGeo)
+    mapView.visibility = android.view.View.VISIBLE
     mapView.invalidate()
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
@@ -403,7 +407,7 @@ private suspend fun drawRoute(
 
     if (full.size >= 2) {
         if (dz > 0.01) {
-            animateZoomDecel(mapView, GeoPoint(fitCenter.latitude, fitCenter.longitude), fitZoom, zoomOutMs, manual)
+            animateZoomDecel(mapView, startGeo, fitZoom, zoomOutMs, manual)
         }
         val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {

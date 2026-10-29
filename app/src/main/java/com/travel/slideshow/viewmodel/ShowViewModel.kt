@@ -330,6 +330,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val photoMs = (cfg.photoDisplaySec * 1000).toLong().coerceAtLeast(600)
         val locMs = (cfg.locationMapSec * 1000).toLong().coerceAtLeast(1200)
         val worldMs = (cfg.worldMapSec * 1000).toLong().coerceAtLeast(2000)
+        val revisitMs = (locMs * 0.3).toLong().coerceAtLeast(1100)
 
         val travelSteps = mutableListOf<MutableList<Segment>>()
         val photoSegs = mutableListOf<MutableList<Segment>>()
@@ -377,7 +378,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             segs += travelSteps[i]
             segs += photoSegs[i]
             if (i + 1 < travelSteps.size && anchors[i] != null && travelSteps[i + 1].isNotEmpty()) {
-                segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), locMs)
+                segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), revisitMs)
             }
         }
         return segs
