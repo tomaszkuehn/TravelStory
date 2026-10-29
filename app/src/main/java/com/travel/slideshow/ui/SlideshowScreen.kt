@@ -145,6 +145,23 @@ fun SlideshowScreen(vm: ShowViewModel) {
 
         InfoChip(st, Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 2.dp))
 
+        if (!idleLike) {
+            IconButton(
+                onClick = { vm.setSettingsVisible(true) },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(end = 6.dp)
+                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = "Ustawienia",
+                    tint = Color.White.copy(alpha = 0.85f)
+                )
+            }
+        }
+
         ControlsOverlay(
             vm = vm,
             st = st,
