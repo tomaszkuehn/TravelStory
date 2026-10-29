@@ -1,5 +1,6 @@
 package com.travel.slideshow.ui
 
+import android.content.Context
 import android.graphics.Color
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
@@ -72,11 +73,11 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit,
             override fun longPressHelper(p: GeoPoint?): Boolean = false
         })
     }
-    val ref = remember { mutableStateOf<MapView?>(null) }
+    val ref = remember { mutableStateOf<GesturingMapView?>(null) }
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            MapView(ctx).apply {
+            GesturingMapView(ctx).apply {
                 setTileSource(TileSourceFactory.MAPNIK)
                 setMultiTouchControls(true)
                 isTilesScaledToDpi = true
@@ -85,18 +86,7 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit,
                 zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
                 controller.setZoom(2.0)
                 controller.setCenter(GeoPoint(15.0, 0.0))
-                setOnTouchListener { v, ev ->
-                    when (ev.actionMasked) {
-                        MotionEvent.ACTION_DOWN,
-                        MotionEvent.ACTION_MOVE,
-                        MotionEvent.ACTION_UP,
-                        MotionEvent.ACTION_POINTER_DOWN,
-                        MotionEvent.ACTION_POINTER_UP,
-                        MotionEvent.ACTION_CANCEL -> gestureHandler()
-                    }
-                    this@apply.onTouchEvent(ev)
-                    true
-                }
+                onGestureSink = { gestureHandler() }
                 tag = tapOverlay
                 overlays.add(tapOverlay)
             }.also { ref.value = it }
@@ -106,6 +96,18 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit,
     DisposableEffect(Unit) { onDispose { ref.value = null } }
     LaunchedEffect(key, mv) {
         mv?.let { effect(it) }
+    }
+}
+
+private class GesturingMapView(context: Context) : MapView(context) {
+    var onGestureSink: (() -> Unit)? = null
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_MOVE,
+            MotionEvent.ACTION_POINTER_DOWN,
+            MotionEvent.ACTION_POINTER_UP -> onGestureSink?.invoke()
+        }
+        return super.dispatchTouchEvent(ev)
     }
 }
 

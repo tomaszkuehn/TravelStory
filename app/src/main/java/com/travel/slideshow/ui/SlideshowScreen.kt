@@ -84,7 +84,9 @@ fun SlideshowScreen(vm: ShowViewModel) {
     ) {
         val fadeSpec = tween<Float>((st.config.transitionSec * 1000).toInt().coerceIn(150, 8000))
         var mapLayerStep by remember { mutableStateOf<ShowStep?>(null) }
+        var showMapLayer by remember { mutableStateOf(false) }
         var photoLayerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
+        var showPhotoLayer by remember { mutableStateOf(false) }
         val mapAlpha = remember { Animatable(0f) }
         val photoAlpha = remember { Animatable(0f) }
 
@@ -92,34 +94,40 @@ fun SlideshowScreen(vm: ShowViewModel) {
             when (val s = st.step) {
                 is ShowStep.WorldCountry, is ShowStep.LocationMap, is ShowStep.RouteMap -> {
                     mapLayerStep = s
+                    showMapLayer = true
                     kotlinx.coroutines.coroutineScope {
                         launch { mapAlpha.animateTo(1f, fadeSpec) }
                         launch { photoAlpha.animateTo(0f, fadeSpec) }
                     }
+                    showPhotoLayer = false
                 }
                 is ShowStep.Photo -> {
                     photoLayerPhoto = s.photo
+                    showPhotoLayer = true
                     kotlinx.coroutines.coroutineScope {
                         launch { photoAlpha.animateTo(1f, fadeSpec) }
                         launch { mapAlpha.animateTo(0f, fadeSpec) }
                     }
+                    showMapLayer = false
                 }
                 else -> kotlinx.coroutines.coroutineScope {
                     launch { mapAlpha.animateTo(0f, fadeSpec) }
                     launch { photoAlpha.animateTo(0f, fadeSpec) }
+                    showMapLayer = false
+                    showPhotoLayer = false
                 }
             }
         }
 
         Box(Modifier.fillMaxSize()) {
             val photoUnder = photoLayerPhoto
-            if (photoUnder != null) {
+            if (photoUnder != null && showPhotoLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = photoAlpha.value }) {
                     PhotoView(photoUnder, vm) { vm.togglePause() }
                 }
             }
             val mapUnder = mapLayerStep
-            if (mapUnder != null) {
+            if (mapUnder != null && showMapLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
                     when (val s = mapUnder) {
                         is ShowStep.WorldCountry -> ShowMap(s, { vm.togglePause() }, vm::onMapGesture, { vm.manualHold.value }, Modifier.fillMaxSize())
