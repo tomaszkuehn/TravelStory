@@ -1,6 +1,7 @@
 package com.travel.slideshow.ui
 
 import android.graphics.Color
+import android.view.MotionEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -26,13 +27,13 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
 @Composable
-fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, modifier) { mapView -> drawWorldCountry(mapView, step) }
+fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, modifier) { mapView -> drawWorldCountry(mapView, step) }
 }
 
 @Composable
-fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, modifier) { mapView -> drawLocation(mapView, step.photo) }
+fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, modifier) { mapView -> drawLocation(mapView, step.photo) }
 }
 
 @Composable
@@ -42,19 +43,21 @@ fun ShowMap(
     totalSec: Float,
     runId: Int,
     onMapTap: () -> Unit,
+    onGesture: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
     val startedAt = remember(runId, step.photo.uri) { System.currentTimeMillis() }
-    SingleMapView(key, onMapTap, modifier) {
+    SingleMapView(key, onMapTap, onGesture, modifier) {
         mapView -> drawRoute(mapView, step, routePts, totalSec, System.currentTimeMillis() - startedAt)
     }
 }
 
 @Composable
-private fun SingleMapView(key: Any, onMapTap: () -> Unit, modifier: Modifier, effect: suspend (MapView) -> Unit) {
+private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, modifier: Modifier, effect: suspend (MapView) -> Unit) {
     val context = LocalContext.current
     val tapHandler by rememberUpdatedState(onMapTap)
+    val gestureHandler by rememberUpdatedState(onGesture)
     val tapOverlay = remember {
         MapEventsOverlay(object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
@@ -78,6 +81,18 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, modifier: Modifier, ef
                 zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
                 controller.setZoom(2.0)
                 controller.setCenter(GeoPoint(15.0, 0.0))
+                setOnTouchListener { v, ev ->
+                    when (ev.actionMasked) {
+                        MotionEvent.ACTION_DOWN,
+                        MotionEvent.ACTION_MOVE,
+                        MotionEvent.ACTION_UP,
+                        MotionEvent.ACTION_POINTER_DOWN,
+                        MotionEvent.ACTION_POINTER_UP,
+                        MotionEvent.ACTION_CANCEL -> gestureHandler()
+                    }
+                    this@apply.onTouchEvent(ev)
+                    true
+                }
                 tag = tapOverlay
                 overlays.add(tapOverlay)
             }.also { ref.value = it }

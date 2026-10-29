@@ -65,6 +65,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
 
     private val pausedGate = MutableStateFlow(false)
+    private val manualGate = MutableStateFlow(false)
+    private var gestureJob: kotlinx.coroutines.Job? = null
     private val stopScan = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastPhotos: List<PhotoItem> = emptyList()
     private var segments: List<Segment> = emptyList()
@@ -131,6 +133,15 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun restoreAfterSettings() {
         togglePause()
+    }
+
+    fun onMapGesture() {
+        manualGate.value = true
+        gestureJob?.cancel()
+        gestureJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(5000)
+            manualGate.value = false
+        }
     }
 
     fun togglePause() {
@@ -437,6 +448,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         while (remaining > 0) {
             if (pausedGate.value) {
                 pausedGate.first { !it }
+                continue
+            }
+            if (manualGate.value) {
+                manualGate.first { !it }
                 continue
             }
             val chunk = min(80, remaining)
