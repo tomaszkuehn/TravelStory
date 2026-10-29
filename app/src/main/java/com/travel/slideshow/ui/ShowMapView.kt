@@ -37,29 +37,8 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
 @Composable
-fun ShowMap(step: ShowStep.WorldCountry, visitedPins: List<PinState>, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawWorldCountry(mapView, step, visitedPins, manual) }
-}
-
-@Composable
 fun ShowMap(
-    step: ShowStep.LocationMap,
-    pastRoutes: List<RouteState>,
-    visitedPins: List<PinState>,
-    onMapTap: () -> Unit,
-    onGesture: () -> Unit,
-    manual: () -> Boolean,
-    onArrived: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView ->
-        drawLocation(mapView, step, pastRoutes, visitedPins, manual, onArrived)
-    }
-}
-
-@Composable
-fun ShowMap(
-    step: ShowStep.RouteMap,
+    step: ShowStep,
     routePts: List<List<Double>>?,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
@@ -68,22 +47,29 @@ fun ShowMap(
     onMapTap: () -> Unit,
     onGesture: () -> Unit,
     manual: () -> Boolean,
-    onArrived: () -> Unit,
+    onArrived: (PhotoItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val key = listOf(step.photo.uri, routePts?.size ?: -1)
-    val startedAt = remember(runId, step.photo.uri) { System.currentTimeMillis() }
-    SingleMapView(key, onMapTap, onGesture, manual, modifier) {
-        mapView ->
-        drawRoute(
-            mapView, step, routePts, pastRoutes, visitedPins, totalSec,
-            System.currentTimeMillis() - startedAt, manual, onArrived
-        )
+    val key: Any = when (step) {
+        is ShowStep.RouteMap -> listOf(step.photo.uri, routePts?.size ?: -1)
+        else -> step
+    }
+    SingleMapView(key, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
+        when (step) {
+            is ShowStep.WorldCountry -> drawWorldCountry(mv, step, visitedPins, manual)
+            is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, manual, { onArrived(step.photo) })
+            is ShowStep.RouteMap ->
+                drawRoute(
+                    mv, step, routePts, pastRoutes, visitedPins, totalSec, elapsedMs, manual,
+                    { onArrived(step.photo) }
+                )
+            else -> {}
+        }
     }
 }
 
 @Composable
-private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView) -> Unit) {
+private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView, Long) -> Unit) {
     val context = LocalContext.current
     val tapHandler by rememberUpdatedState(onMapTap)
     val gestureHandler by rememberUpdatedState(onGesture)
@@ -117,9 +103,10 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit,
         }
     )
     val mv = ref.value
+    val startedAt = remember(key) { System.currentTimeMillis() }
     DisposableEffect(Unit) { onDispose { ref.value = null } }
     LaunchedEffect(key, mv) {
-        mv?.let { effect(it) }
+        mv?.let { effect(it, System.currentTimeMillis() - startedAt) }
     }
 }
 

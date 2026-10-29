@@ -129,34 +129,27 @@ fun SlideshowScreen(vm: ShowViewModel) {
             val mapUnder = mapLayerStep
             if (mapUnder != null && showMapLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
-                    when (val s = mapUnder) {
-                        is ShowStep.WorldCountry -> ShowMap(s, st.visitedPins, { vm.togglePause() }, vm::onMapGesture, { vm.manualHold.value }, Modifier.fillMaxSize())
-                        is ShowStep.LocationMap -> ShowMap(
-                            s,
-                            st.pastRoutes,
-                            st.visitedPins,
-                            { vm.togglePause() },
-                            vm::onMapGesture,
-                            { vm.manualHold.value },
-                            { vm.markVisited(s.photo.lat ?: 0.0, s.photo.lon ?: 0.0, (s.photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (s.photo.countryName ?: "")) },
-                            Modifier.fillMaxSize(),
-                        )
-                        is ShowStep.RouteMap ->
-                            ShowMap(
-                                s,
-                                st.route?.takeIf { it.uri == s.photo.uri }?.points,
-                                st.pastRoutes,
-                                st.visitedPins,
-                                st.config.locationMapSec,
-                                st.runId,
-                                { vm.togglePause() },
-                                vm::onMapGesture,
-                                { vm.manualHold.value },
-                                { vm.markVisited(s.photo.lat ?: 0.0, s.photo.lon ?: 0.0, (s.photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (s.photo.countryName ?: "")) },
-                                Modifier.fillMaxSize()
+                    val rm = mapUnder as? ShowStep.RouteMap
+                    val routePts = st.route?.takeIf { rm != null && it.uri == rm.photo.uri }?.points
+                    ShowMap(
+                        mapUnder,
+                        routePts,
+                        st.pastRoutes,
+                        st.visitedPins,
+                        st.config.locationMapSec,
+                        st.runId,
+                        { vm.togglePause() },
+                        vm::onMapGesture,
+                        { vm.manualHold.value },
+                        { photo ->
+                            vm.markVisited(
+                                photo.lat ?: 0.0,
+                                photo.lon ?: 0.0,
+                                (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: ""),
                             )
-                        else -> {}
-                    }
+                        },
+                        Modifier.fillMaxSize(),
+                    )
                 }
             }
             when (val s = st.step) {
