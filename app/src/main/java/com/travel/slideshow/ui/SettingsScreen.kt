@@ -126,6 +126,9 @@ fun SettingsScreen(vm: ShowViewModel) {
                 SliderRow("Wstęp mapa świata / państwo", cfg.worldMapSec, 2f..40f, "s") {
                     vm.updateConfig { c -> c.copy(worldMapSec = it) }
                 }
+                SliderRow("Przenikanie mapa–zdjęcie", cfg.transitionSec, 0.2f..5f, "s") {
+                    vm.updateConfig { c -> c.copy(transitionSec = it) }
+                }
                 SliderRow("Minimalna odległość mapy lokalizacji", cfg.distanceKmThreshold.toFloat(), 1f..100f, "km") {
                     vm.updateConfig { c -> c.copy(distanceKmThreshold = it.toDouble()) }
                 }

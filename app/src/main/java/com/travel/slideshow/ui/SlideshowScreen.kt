@@ -1,6 +1,7 @@
 package com.travel.slideshow.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -41,12 +42,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -62,6 +65,7 @@ import com.travel.slideshow.viewmodel.ShowStep
 import com.travel.slideshow.viewmodel.ShowViewModel
 import com.travel.slideshow.viewmodel.UiState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun SlideshowScreen(vm: ShowViewModel) {
@@ -78,16 +82,67 @@ fun SlideshowScreen(vm: ShowViewModel) {
                 )
             }
     ) {
-        when (val step = st.step) {
-            is ShowStep.Idle -> IdleView(st, vm)
-            is ShowStep.Scanning -> ScanningView(st, step, vm)
-            is ShowStep.WorldCountry -> ShowMap(step, Modifier.fillMaxSize())
-            is ShowStep.LocationMap -> ShowMap(step, Modifier.fillMaxSize())
-            is ShowStep.Photo -> PhotoView(step.photo, vm)
-            is ShowStep.Finished -> FinishedView(vm)
+        val fadeSpec = tween<Float>((st.config.transitionSec * 1000).toInt().coerceIn(150, 8000))
+        var mapLayerStep by remember { mutableStateOf<ShowStep?>(null) }
+        var photoLayerPhoto by remember { mutableStateOf<PhotoItem?>(null) }
+        val mapAlpha = remember { Animatable(0f) }
+        val photoAlpha = remember { Animatable(0f) }
+
+        LaunchedEffect(st.step) {
+            when (val s = st.step) {
+                is ShowStep.WorldCountry, is ShowStep.LocationMap, is ShowStep.RouteMap -> {
+                    mapLayerStep = s
+                    kotlinx.coroutines.coroutineScope {
+                        launch { mapAlpha.animateTo(1f, fadeSpec) }
+                        launch { photoAlpha.animateTo(0f, fadeSpec) }
+                    }
+                }
+                is ShowStep.Photo -> {
+                    photoLayerPhoto = s.photo
+                    kotlinx.coroutines.coroutineScope {
+                        launch { photoAlpha.animateTo(1f, fadeSpec) }
+                        launch { mapAlpha.animateTo(0f, fadeSpec) }
+                    }
+                }
+                else -> kotlinx.coroutines.coroutineScope {
+                    launch { mapAlpha.animateTo(0f, fadeSpec) }
+                    launch { photoAlpha.animateTo(0f, fadeSpec) }
+                }
+            }
         }
 
-        InfoChip(st, Modifier.align(Alignment.TopCenter))
+        Box(Modifier.fillMaxSize()) {
+            val photoUnder = photoLayerPhoto
+            if (photoUnder != null) {
+                Box(Modifier.fillMaxSize().graphicsLayer { alpha = photoAlpha.value }) {
+                    PhotoView(photoUnder, vm)
+                }
+            }
+            val mapUnder = mapLayerStep
+            if (mapUnder != null) {
+                Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
+                    when (val s = mapUnder) {
+                        is ShowStep.WorldCountry -> ShowMap(s, Modifier.fillMaxSize())
+                        is ShowStep.LocationMap -> ShowMap(s, Modifier.fillMaxSize())
+                        is ShowStep.RouteMap ->
+                            ShowMap(
+                                s,
+                                st.route?.takeIf { it.uri == s.photo.uri }?.points,
+                                Modifier.fillMaxSize()
+                            )
+                        else -> {}
+                    }
+                }
+            }
+            when (val s = st.step) {
+                is ShowStep.Idle -> IdleView(st, vm)
+                is ShowStep.Scanning -> ScanningView(st, s, vm)
+                is ShowStep.Finished -> FinishedView(vm)
+                else -> {}
+            }
+        }
+
+        InfoChip(st, Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 2.dp))
 
         ControlsOverlay(
             vm = vm,

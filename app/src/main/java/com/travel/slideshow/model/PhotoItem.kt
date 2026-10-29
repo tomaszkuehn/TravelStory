@@ -23,4 +23,5 @@ data class ShowConfig(
     val musicVolumePct: Int = 80,
     val newestFirst: Boolean = false,
     val onlyWithLocation: Boolean = false,
+    val transitionSec: Float = 1.0f,
 )

@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import kotlin.math.min
 
 sealed interface ShowStep {
@@ -28,9 +29,12 @@ sealed interface ShowStep {
     data class Scanning(val count: Int) : ShowStep
     data class WorldCountry(val country: CountryShape, val zoomedIn: Boolean) : ShowStep
     data class LocationMap(val photo: PhotoItem) : ShowStep
+    data class RouteMap(val from: PhotoItem, val photo: PhotoItem) : ShowStep
     data class Photo(val photo: PhotoItem) : ShowStep
     data object Finished : ShowStep
 }
+
+data class RouteState(val uri: Uri, val points: List<List<Double>>)
 
 data class Segment(val step: ShowStep, val durMs: Long, val musicIso3: String? = null)
 
@@ -45,6 +49,7 @@ data class UiState(
     val photoFolderName: String? = null,
     val musicFolderName: String? = null,
     val message: String? = null,
+    val route: RouteState? = null,
 )
 
 class ShowViewModel(app: Application) : AndroidViewModel(app) {
@@ -66,6 +71,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private var driver: Job? = null
     private var pausedBeforeSettings = false
     private var musicRoot: Uri? = null
+    private val routeCache = HashMap<String, List<List<Double>>>()
 
     init {
         musicRoot = prefs.getString(PREF_MUSIC_ROOT, null)?.toUriOrNull()
@@ -95,6 +101,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             .putInt(PREF_VOLUME, cfg.musicVolumePct)
             .putBoolean(PREF_DESC, cfg.newestFirst)
             .putBoolean(PREF_ONLY_LOC, cfg.onlyWithLocation)
+            .putFloat(PREF_TRANSITION, cfg.transitionSec)
             .apply()
         musicPlayer.setVolume(cfg.musicVolumePct / 100f * 0.85f)
         if (lastPhotos.isNotEmpty() &&
@@ -257,6 +264,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         var prevLat: Double? = null
         var prevLon: Double? = null
         var prevIso: String? = null
+        var prevPhoto: PhotoItem? = null
         for (p in filtered) {
             var musicIso: String? = null
             if (p.lat != null && p.lon != null) {
@@ -273,17 +281,70 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     val d = if (prevLat != null && prevLon != null) {
                         Geo.haversineKm(prevLat, prevLon, p.lat, p.lon)
                     } else Double.MAX_VALUE
-                    if (d >= cfg.distanceKmThreshold) {
-                        segs += Segment(ShowStep.LocationMap(p), locMs)
+                    when {
+                        d >= cfg.distanceKmThreshold ->
+                            segs += Segment(ShowStep.LocationMap(p), locMs)
+                        d > ROUTE_MIN_KM && prevPhoto != null ->
+                            segs += Segment(ShowStep.RouteMap(prevPhoto!!, p), locMs)
                     }
                 }
                 prevLat = p.lat
                 prevLon = p.lon
+                prevPhoto = p
             }
             segs += Segment(ShowStep.Photo(p), photoMs)
             if (p.iso3 != null) prevIso = p.iso3
         }
         return segs
+    }
+
+    private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
+        "%.5f,%.5f|%.5f,%.5f".format(lat1, lon1, lat2, lon2)
+
+    private fun fetchRoute(stepIn: ShowStep.RouteMap) {
+        val from = stepIn.from
+        val to = stepIn.photo
+        if (from.lat == null || from.lon == null || to.lat == null || to.lon == null) return
+        val key = routeKey(from.lat, from.lon, to.lat, to.lon)
+        val cached = routeCache[key]
+        if (cached != null) {
+            _state.value = _state.value.copy(route = RouteState(to.uri, cached))
+            return
+        }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val pts = osrmRoute(from.lat, from.lon, to.lat, to.lon)
+                ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
+            routeCache[key] = pts
+            _state.value = _state.value.copy(route = RouteState(to.uri, pts))
+        }
+    }
+
+    private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
+        return try {
+            val url = java.net.URL(
+                "https://router.project-osrm.org/route/v1/driving/" +
+                    "%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson"
+                    .format(lon1, lat1, lon2, lat2)
+            )
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.setRequestProperty("User-Agent", "TravelSlideshow/1.0")
+            val body = conn.inputStream.use { it.readBytes().decodeToString() }
+            conn.disconnect()
+            val root = JSONObject(body)
+            val routes = root.optJSONArray("routes") ?: return null
+            if (routes.length() == 0) return null
+            val coords = routes.getJSONObject(0).getJSONObject("geometry").getJSONArray("coordinates")
+            val out = mutableListOf<List<Double>>()
+            for (i in 0 until coords.length()) {
+                val c = coords.getJSONArray(i)
+                out.add(listOf(c.getDouble(0), c.getDouble(1)))
+            }
+            if (out.size < 2) null else out
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun relaunch(syncMusic: Boolean = false) {
@@ -297,6 +358,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             for (i in nextIdx until segments.size) {
                 segIdx = i
                 val seg = segments[i]
+                if (seg.step is ShowStep.RouteMap) fetchRoute(seg.step as ShowStep.RouteMap)
                 if (first) {
                     first = false
                     if (syncMusic) {
@@ -357,6 +419,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             musicVolumePct = prefs.getInt(PREF_VOLUME, 80),
             newestFirst = prefs.getBoolean(PREF_DESC, false),
             onlyWithLocation = prefs.getBoolean(PREF_ONLY_LOC, false),
+            transitionSec = prefs.getFloat(PREF_TRANSITION, 1f),
         )
     }
 
@@ -377,5 +440,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_VOLUME = "volume"
         private const val PREF_DESC = "desc"
         private const val PREF_ONLY_LOC = "only_loc"
+        private const val PREF_TRANSITION = "transition_sec"
+        private const val ROUTE_MIN_KM = 1.0
     }
 }
