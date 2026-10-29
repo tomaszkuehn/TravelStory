@@ -128,6 +128,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
                             ShowMap(
                                 s,
                                 st.route?.takeIf { it.uri == s.photo.uri }?.points,
+                                st.config.locationMapSec,
                                 Modifier.fillMaxSize()
                             )
                         else -> {}

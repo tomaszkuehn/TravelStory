@@ -31,9 +31,9 @@ fun ShowMap(step: ShowStep.LocationMap, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ShowMap(step: ShowStep.RouteMap, routePts: List<List<Double>>?, modifier: Modifier = Modifier) {
+fun ShowMap(step: ShowStep.RouteMap, routePts: List<List<Double>>?, totalSec: Float, modifier: Modifier = Modifier) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
-    SingleMapView(key, modifier) { mapView -> drawRoute(mapView, step, routePts) }
+    SingleMapView(key, modifier) { mapView -> drawRoute(mapView, step, routePts, totalSec) }
 }
 
 @Composable
@@ -135,7 +135,7 @@ private suspend fun animateZoomDecel(mapView: MapView, target: GeoPoint, targetZ
     }
 }
 
-private fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<List<Double>>?) {
+private suspend fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<List<Double>>?, totalSec: Float) {
     val from = step.from
     val to = step.photo
     val aLat = from.lat ?: return
@@ -144,10 +144,10 @@ private fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<
     val bLon = to.lon ?: return
     mapView.overlays.clear()
 
-    val pts = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
+    val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }
     val line = Polyline(mapView)
-    line.setPoints(pts)
+    line.setPoints(full)
     line.outlinePaint.color = 0xFF29B6F6.toInt()
     line.outlinePaint.strokeWidth = 6.0f
     line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
@@ -170,7 +170,7 @@ private fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<
     )
 
     var w = 180.0; var s = 90.0; var e = -180.0; var n = -90.0
-    for (p in pts) {
+    for (p in full) {
         w = minOf(w, p.longitude)
         e = maxOf(e, p.longitude)
         s = minOf(s, p.latitude)
@@ -179,4 +179,37 @@ private fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<
     val bb = BoundingBox(n, e, s, w)
     mapView.zoomToBoundingBox(bb, false, 120)
     mapView.invalidate()
+
+    val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
+    val zoomMs = minOf(2200L, (totalMs * 0.35).toLong())
+    val drawMs = (totalMs - zoomMs).coerceAtLeast(1200)
+    if (full.size >= 2) {
+        val steps = (drawMs / 40).coerceIn(10L, 900L)
+        for (i in 1..steps) {
+            val t = i.toDouble() / steps
+            val frac = t * t * (3 - 2 * t)
+            val posF = frac * (full.size - 1)
+            val idx = posF.toInt()
+            val partial = ArrayList<GeoPoint>(idx + 2)
+            for (k in 0..idx) partial.add(full[k])
+            if (idx + 1 <= full.size - 1) {
+                val f = posF - idx
+                val a = full[idx]
+                val b = full[idx + 1]
+                partial.add(
+                    GeoPoint(
+                        a.latitude + (b.latitude - a.latitude) * f,
+                        a.longitude + (b.longitude - a.longitude) * f
+                    )
+                )
+            }
+            line.setPoints(partial)
+            mapView.invalidate()
+            kotlinx.coroutines.delay(40)
+        }
+        line.setPoints(full)
+        mapView.invalidate()
+    }
+
+    animateZoomDecel(mapView, GeoPoint(bLat, bLon), 15.5, zoomMs)
 }
