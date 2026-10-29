@@ -40,11 +40,15 @@ fun ShowMap(
     step: ShowStep.RouteMap,
     routePts: List<List<Double>>?,
     totalSec: Float,
+    runId: Int,
     onMapTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
-    SingleMapView(key, onMapTap, modifier) { mapView -> drawRoute(mapView, step, routePts, totalSec) }
+    val startedAt = remember(runId, step.photo.uri) { System.currentTimeMillis() }
+    SingleMapView(key, onMapTap, modifier) {
+        mapView -> drawRoute(mapView, step, routePts, totalSec, System.currentTimeMillis() - startedAt)
+    }
 }
 
 @Composable
@@ -165,7 +169,13 @@ private suspend fun animateZoomDecel(mapView: MapView, target: GeoPoint, targetZ
     }
 }
 
-private suspend fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePts: List<List<Double>>?, totalSec: Float) {
+private suspend fun drawRoute(
+    mapView: MapView,
+    step: ShowStep.RouteMap,
+    routePts: List<List<Double>>?,
+    totalSec: Float,
+    elapsedMs: Long,
+) {
     val from = step.from
     val to = step.photo
     val aLat = from.lat ?: return
@@ -211,10 +221,16 @@ private suspend fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePt
     mapView.invalidate()
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
-    val zoomMs = minOf(2200L, (totalMs * 0.35).toLong())
-    val drawMs = (totalMs - zoomMs).coerceAtLeast(1200)
+    val elapsed = elapsedMs.coerceAtLeast(0)
+    val budget = (totalMs - elapsed).coerceAtLeast(0)
+    val zoomMs = run {
+        val wanted = minOf(2200L, (totalMs * 0.35).toLong())
+        if (budget > wanted + 800) wanted else (budget - 300).coerceIn(400L, wanted)
+    }
+    val remainMs = (totalMs - elapsed - zoomMs)
     if (full.size >= 2) {
-        val steps = (drawMs / 40).coerceIn(10L, 900L)
+        val drawMs = remainMs.coerceAtLeast(0)
+        val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {
             val t = i.toDouble() / steps
             val frac = t * t * (3 - 2 * t)
@@ -235,7 +251,7 @@ private suspend fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePt
             }
             line.setPoints(partial)
             mapView.invalidate()
-            kotlinx.coroutines.delay(40)
+            kotlinx.coroutines.delay(if (drawMs <= 0) 0 else drawMs / steps)
         }
         line.setPoints(full)
         mapView.invalidate()

@@ -50,6 +50,7 @@ data class UiState(
     val musicFolderName: String? = null,
     val message: String? = null,
     val route: RouteState? = null,
+    val runId: Int = 0,
 )
 
 class ShowViewModel(app: Application) : AndroidViewModel(app) {
@@ -350,6 +351,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun relaunch(syncMusic: Boolean = false) {
         var nextIdx = segIdx
         driver?.cancel()
+        val startedRunId = _state.value.runId + 1
+        _state.value = _state.value.copy(runId = startedRunId)
         musicPlayer.setVolume(_state.value.config.musicVolumePct / 100f * 0.85f)
         driver = viewModelScope.launch {
             _state.value = _state.value.copy(stopped = false)
