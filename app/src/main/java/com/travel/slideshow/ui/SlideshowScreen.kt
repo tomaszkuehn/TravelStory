@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -229,6 +230,7 @@ private fun PhotoView(photo: PhotoItem, vm: ShowViewModel) {
                         },
                         onDragEnd = {
                             if (dragAccum.floatValue <= -threshold) vm.skipNext()
+                            else if (dragAccum.floatValue >= threshold) vm.skipPrevious()
                         }
                     )
                 }
@@ -285,6 +287,9 @@ fun ControlsOverlay(vm: ShowViewModel, st: UiState, visible: Boolean, modifier: 
             }
             IconButton(onClick = { vm.skipNext() }) {
                 Icon(Icons.Filled.SkipNext, contentDescription = "Następne", tint = Color.White)
+            }
+            IconButton(onClick = { vm.skipPrevious() }) {
+                Icon(Icons.Filled.SkipPrevious, contentDescription = "Poprzednie", tint = Color.White)
             }
             IconButton(onClick = { vm.restartCountry() }) {
                 Icon(Icons.Filled.Replay, contentDescription = "Od początku bieżącego państwa", tint = Color(0xFFFFB74D))

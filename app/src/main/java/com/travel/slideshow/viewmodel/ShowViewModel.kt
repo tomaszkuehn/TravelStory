@@ -151,10 +151,21 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun skipNext() {
         if (segments.isEmpty()) return
-        val next = min(segIdx + 1, segments.size)
-        if (next >= segments.size) { setFinished(); return }
-        segIdx = next
-        relaunch()
+        val next = (segIdx + 1 until segments.size).firstOrNull { segments[it].step is ShowStep.Photo }
+        if (next == null) { setFinished(); return }
+        jumpTo(next)
+    }
+
+    fun skipPrevious() {
+        if (segments.isEmpty()) return
+        val prev = ((segIdx - 1) downTo 0).firstOrNull { segments[it].step is ShowStep.Photo }
+        if (prev == null) return
+        jumpTo(prev)
+    }
+
+    private fun jumpTo(idx: Int) {
+        segIdx = idx
+        relaunch(syncMusic = true)
     }
 
     fun onPhotoFolderPicked(uri: Uri) {
@@ -275,16 +286,30 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         return segs
     }
 
-    private fun relaunch() {
+    private fun relaunch(syncMusic: Boolean = false) {
         var nextIdx = segIdx
         driver?.cancel()
         musicPlayer.setVolume(_state.value.config.musicVolumePct / 100f * 0.85f)
         driver = viewModelScope.launch {
             _state.value = _state.value.copy(stopped = false)
             if (nextIdx >= segments.size) nextIdx = 0
+            var first = true
             for (i in nextIdx until segments.size) {
                 segIdx = i
                 val seg = segments[i]
+                if (first) {
+                    first = false
+                    if (syncMusic) {
+                        val iso = (seg.step as? ShowStep.Photo)?.photo?.iso3
+                        if (iso != null && _state.value.config.musicEnabled) {
+                            val shape = WorldMapData.byIso(iso)
+                            val name = shape?.name ?: ""
+                            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                musicPlayer.play(musicResolver.tracksFor(iso, name, musicRoot))
+                            }
+                        }
+                    }
+                }
                 if (seg.musicIso3 != null && _state.value.config.musicEnabled) {
                     val iso = seg.musicIso3
                     val shape = WorldMapData.byIso(iso)
