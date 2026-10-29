@@ -379,6 +379,7 @@ private suspend fun drawRoute(
     mapView.controller.setCenter(startGeo)
     mapView.invalidate()
     waitManualHeld(manual)
+    if (routePts == null) return
 
     mapView.zoomToBoundingBox(bb, false, 120)
     val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 15.5)

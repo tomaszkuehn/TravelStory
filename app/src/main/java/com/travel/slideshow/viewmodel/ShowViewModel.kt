@@ -463,6 +463,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 segIdx = i
                 val seg = segments[i]
                 if (seg.step is ShowStep.RouteMap) fetchRoute(seg.step as ShowStep.RouteMap)
+                (segments.getOrNull(i + 1)?.step as? ShowStep.RouteMap)?.let { if (it.photo.uri != (seg.step as? ShowStep.RouteMap)?.photo?.uri) fetchRoute(it) }
                 if (first) {
                     first = false
                     if (syncMusic) {
