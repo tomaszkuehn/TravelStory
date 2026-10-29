@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import kotlin.math.min
@@ -276,31 +277,35 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value.config.newestFirst,
                 shouldStop = { stopScan.get() },
             ) { n ->
-                _state.value = _state.value.copy(step = ShowStep.Scanning(n))
+                _state.update { it.copy(step = ShowStep.Scanning(n)) }
             }
             val stopped = stopScan.get()
             val located = items.count { it.iso3 != null }
-            _state.value = _state.value.copy(itemCount = items.size, withLocation = located)
+            _state.update { it.copy(itemCount = items.size, withLocation = located) }
             if (items.isEmpty()) {
                 lastPhotos = emptyList()
-                _state.value = _state.value.copy(
-                    step = ShowStep.Idle,
-                    message = if (stopped) "Skanowanie zatrzymano — brak zdjęć." else "Nie znaleziono zdjęć w wybranym folderze.",
-                )
+                _state.update {
+                    it.copy(
+                        step = ShowStep.Idle,
+                        message = if (stopped) "Skanowanie zatrzymano — brak zdjęć." else "Nie znaleziono zdjęć w wybranym folderze.",
+                    )
+                }
                 return@launch
             }
             lastPhotos = items
             segments = buildSegments(items)
-            _state.value = _state.value.copy(
-                step = ShowStep.Idle,
-                itemCount = items.size,
-                withLocation = located,
-                message = when {
-                    segments.isEmpty() -> "Brak zdjęć spełniających ustawienia (np. wszystkie bez lokalizacji)."
-                    stopped -> "Skanowanie zatrzymano — pokaz zawiera ${items.size} przeskanowanych zdjęć."
-                    else -> null
-                },
-            )
+            _state.update {
+                it.copy(
+                    step = ShowStep.Idle,
+                    itemCount = items.size,
+                    withLocation = located,
+                    message = when {
+                        segments.isEmpty() -> "Brak zdjęć spełniających ustawienia (np. wszystkie bez lokalizacji)."
+                        stopped -> "Skanowanie zatrzymano — pokaz zawiera ${items.size} przeskanowanych zdjęć."
+                        else -> null
+                    },
+                )
+            }
         }
     }
 
@@ -309,7 +314,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun message(text: String?) {
-        _state.value = _state.value.copy(message = text)
+        _state.update { it.copy(message = text) }
     }
 
     private fun buildSegments(photos: List<PhotoItem>): List<Segment> {
@@ -365,7 +370,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val cached = routeCache[key]
         if (cached != null) {
             addPastRoute(to.uri, cached)
-            _state.value = _state.value.copy(route = RouteState(to.uri, cached))
+            _state.update { it.copy(route = RouteState(to.uri, cached)) }
             return
         }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -373,15 +378,16 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
             routeCache[key] = pts
             addPastRoute(to.uri, pts)
-            _state.value = _state.value.copy(route = RouteState(to.uri, pts))
+            _state.update { it.copy(route = RouteState(to.uri, pts)) }
         }
     }
 
     private fun addPastRoute(uri: Uri, pts: List<List<Double>>) {
-        val cur = _state.value
-        if (cur.pastRoutes.any { it.uri == uri } || uri in pastRoutesSet) return
+        _state.update { cur ->
+            if (cur.pastRoutes.any { it.uri == uri } || uri in pastRoutesSet) cur
+            else cur.copy(pastRoutes = cur.pastRoutes + RouteState(uri, pts))
+        }
         pastRoutesSet.add(uri)
-        _state.value = cur.copy(pastRoutes = cur.pastRoutes + RouteState(uri, pts))
     }
 
     private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {

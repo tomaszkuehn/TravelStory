@@ -162,12 +162,13 @@ private fun addPastRouteLines(mapView: MapView, pastRoutes: List<RouteState>, sk
     for (past in pastRoutes) {
         if (past.uri == skipUri) continue
         if (past.points.size < 2) continue
-        val faint = Polyline(mapView)
-        faint.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
-        faint.outlinePaint.color = 0x6690A4AE.toInt()
-        faint.outlinePaint.strokeWidth = 3.5f
-        faint.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-        mapView.overlays.add(faint)
+        val line = Polyline(mapView)
+        line.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
+        line.outlinePaint.color = 0xFF29B6F6.toInt()
+        line.outlinePaint.strokeWidth = 6.0f
+        line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+        line.outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+        mapView.overlays.add(line)
     }
 }
 
