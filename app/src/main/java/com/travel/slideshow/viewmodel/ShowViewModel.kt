@@ -69,6 +69,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private var lastPhotos: List<PhotoItem> = emptyList()
     private var segments: List<Segment> = emptyList()
     private var segIdx = 0
+    private var blockReplayUri: String? = null
     private var driver: Job? = null
     private var pausedBeforeSettings = false
     private var musicRoot: Uri? = null
@@ -159,6 +160,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun skipNext() {
         if (segments.isEmpty()) return
+        blockReplayUri = null
         val next = (segIdx + 1 until segments.size).firstOrNull { segments[it].step is ShowStep.Photo }
         if (next == null) { setFinished(); return }
         jumpTo(next)
@@ -166,9 +168,49 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun skipPrevious() {
         if (segments.isEmpty()) return
-        val prev = ((segIdx - 1) downTo 0).firstOrNull { segments[it].step is ShowStep.Photo }
-        if (prev == null) return
-        jumpTo(prev)
+        val cur = segments.getOrNull(segIdx)?.step
+        val target: Int? = when {
+            cur is ShowStep.Photo && blockReplayUri == cur.photo.uri.toString() -> {
+                blockReplayUri = null
+                prevPhotoIdx(segIdx)
+            }
+            cur is ShowStep.Photo -> {
+                val bs = blockStartOf(segIdx, cur.photo.uri)
+                if (bs != null) {
+                    blockReplayUri = cur.photo.uri.toString()
+                    bs
+                } else {
+                    blockReplayUri = null
+                    prevPhotoIdx(segIdx)
+                }
+            }
+            else -> {
+                blockReplayUri = null
+                prevPhotoIdx(segIdx)
+            }
+        }
+        target?.let { jumpTo(it) }
+    }
+
+    private fun prevPhotoIdx(from: Int): Int? =
+        ((from - 1) downTo 0).firstOrNull { segments[it].step is ShowStep.Photo }
+
+    private fun blockStartOf(photoIdx: Int, photoUri: Uri): Int? {
+        val photo = (segments[photoIdx].step as? ShowStep.Photo)?.photo ?: return null
+        var i = photoIdx - 1
+        var start: Int? = null
+        while (i >= 0) {
+            val belongs = when (val st = segments[i].step) {
+                is ShowStep.LocationMap -> st.photo.uri == photoUri
+                is ShowStep.RouteMap -> st.photo.uri == photoUri
+                is ShowStep.WorldCountry -> photo.iso3 != null && st.country.iso3 == photo.iso3
+                else -> false
+            }
+            if (!belongs) break
+            start = i
+            i--
+        }
+        return start
     }
 
     private fun jumpTo(idx: Int) {
