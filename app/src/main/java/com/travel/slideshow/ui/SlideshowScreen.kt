@@ -123,7 +123,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
                     when (val s = mapUnder) {
                         is ShowStep.WorldCountry -> ShowMap(s, { vm.togglePause() }, vm::onMapGesture, { vm.manualHold.value }, Modifier.fillMaxSize())
-                        is ShowStep.LocationMap -> ShowMap(s, { vm.togglePause() }, vm::onMapGesture, { vm.manualHold.value }, Modifier.fillMaxSize())
+                        is ShowStep.LocationMap -> ShowMap(s, st.pastRoutes, { vm.togglePause() }, vm::onMapGesture, { vm.manualHold.value }, Modifier.fillMaxSize())
                         is ShowStep.RouteMap ->
                             ShowMap(
                                 s,

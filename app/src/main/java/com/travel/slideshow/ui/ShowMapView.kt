@@ -34,8 +34,8 @@ fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, onGesture: () -> 
 }
 
 @Composable
-fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawLocation(mapView, step.photo, manual) }
+fun ShowMap(step: ShowStep.LocationMap, pastRoutes: List<RouteState>, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawLocation(mapView, step.photo, pastRoutes, manual) }
 }
 
 @Composable
@@ -158,10 +158,24 @@ private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCount
     }
 }
 
-private suspend fun drawLocation(mapView: MapView, photo: PhotoItem, manual: () -> Boolean) {
+private fun addPastRouteLines(mapView: MapView, pastRoutes: List<RouteState>, skipUri: Any?) {
+    for (past in pastRoutes) {
+        if (past.uri == skipUri) continue
+        if (past.points.size < 2) continue
+        val faint = Polyline(mapView)
+        faint.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
+        faint.outlinePaint.color = 0x6690A4AE.toInt()
+        faint.outlinePaint.strokeWidth = 3.5f
+        faint.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+        mapView.overlays.add(faint)
+    }
+}
+
+private suspend fun drawLocation(mapView: MapView, photo: PhotoItem, pastRoutes: List<RouteState>, manual: () -> Boolean) {
     val lat = photo.lat ?: return
     val lon = photo.lon ?: return
     clearOverlays(mapView)
+    addPastRouteLines(mapView, pastRoutes, photo.uri)
     val geo = GeoPoint(lat, lon)
     mapView.overlays.add(
         Marker(mapView).apply {
@@ -218,16 +232,7 @@ private suspend fun drawRoute(
     val bLon = to.lon ?: return
     clearOverlays(mapView)
 
-    for (past in pastRoutes) {
-        if (past.uri == to.uri) continue
-        if (past.points.size < 2) continue
-        val faint = Polyline(mapView)
-        faint.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
-        faint.outlinePaint.color = 0x6690A4AE.toInt()
-        faint.outlinePaint.strokeWidth = 3.5f
-        faint.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-        mapView.overlays.add(faint)
-    }
+    addPastRouteLines(mapView, pastRoutes, to.uri)
 
     val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }

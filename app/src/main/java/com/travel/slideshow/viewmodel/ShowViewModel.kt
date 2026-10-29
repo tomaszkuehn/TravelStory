@@ -340,11 +340,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     val d = if (prevLat != null && prevLon != null) {
                         Geo.haversineKm(prevLat, prevLon, p.lat, p.lon)
                     } else Double.MAX_VALUE
-                    when {
-                        d >= cfg.distanceKmThreshold ->
-                            segs += Segment(ShowStep.LocationMap(p), locMs)
-                        d > ROUTE_MIN_KM && prevPhoto != null ->
-                            segs += Segment(ShowStep.RouteMap(prevPhoto!!, p), locMs)
+                    if (d > ROUTE_MIN_KM && prevPhoto != null) {
+                        segs += Segment(ShowStep.RouteMap(prevPhoto!!, p), locMs)
                     }
                 }
                 prevLat = p.lat
@@ -360,18 +357,24 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
         "%.5f,%.5f|%.5f,%.5f".format(lat1, lon1, lat2, lon2)
 
-    private suspend fun fetchRoute(stepIn: ShowStep.RouteMap) {
+    private fun fetchRoute(stepIn: ShowStep.RouteMap) {
         val from = stepIn.from
         val to = stepIn.photo
         if (from.lat == null || from.lon == null || to.lat == null || to.lon == null) return
         val key = routeKey(from.lat, from.lon, to.lat, to.lon)
         val cached = routeCache[key]
-        val pts = cached ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            osrmRoute(from.lat, from.lon, to.lat, to.lon)
-        } ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
-        routeCache[key] = pts
-        addPastRoute(to.uri, pts)
-        _state.value = _state.value.copy(route = RouteState(to.uri, pts))
+        if (cached != null) {
+            addPastRoute(to.uri, cached)
+            _state.value = _state.value.copy(route = RouteState(to.uri, cached))
+            return
+        }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val pts = osrmRoute(from.lat!!, from.lon!!, to.lat!!, to.lon!!)
+                ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
+            routeCache[key] = pts
+            addPastRoute(to.uri, pts)
+            _state.value = _state.value.copy(route = RouteState(to.uri, pts))
+        }
     }
 
     private fun addPastRoute(uri: Uri, pts: List<List<Double>>) {
