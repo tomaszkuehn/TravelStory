@@ -1,7 +1,12 @@
 package com.travel.slideshow.ui
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.drawable.BitmapDrawable
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -26,6 +31,7 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
@@ -109,6 +115,65 @@ private class GesturingMapView(context: Context) : MapView(context) {
         }
         return super.dispatchTouchEvent(ev)
     }
+}
+
+private class AirplaneTipOverlay : Overlay() {
+    var tip: GeoPoint? = null
+    var bearingDeg = 0.0
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(30, 40, 55)
+        style = Paint.Style.STROKE
+        strokeWidth = 2.0f
+    }
+
+    override fun draw(canvas: Canvas, projection: org.osmdroid.views.Projection) {
+        val t = tip ?: return
+        val px = projection.toPixels(t, null) ?: return
+        canvas.save()
+        canvas.translate(px.x.toFloat(), px.y.toFloat())
+        canvas.rotate(bearingDeg.toFloat())
+        val path = Path()
+        path.moveTo(0f, -22f)
+        path.lineTo(3.5f, -9f)
+        path.lineTo(19f, -2f)
+        path.lineTo(19f, 3f)
+        path.lineTo(3.5f, 3f)
+        path.lineTo(2.5f, 9f)
+        path.lineTo(10f, 16f)
+        path.lineTo(10f, 19f)
+        path.lineTo(1f, 16.5f)
+        path.lineTo(-1f, 16.5f)
+        path.lineTo(-10f, 19f)
+        path.lineTo(-10f, 16f)
+        path.lineTo(-2.5f, 9f)
+        path.lineTo(-3.5f, 3f)
+        path.lineTo(-19f, 3f)
+        path.lineTo(-19f, -2f)
+        path.lineTo(-3.5f, -9f)
+        path.close()
+        canvas.drawPath(path, fill)
+        canvas.drawPath(path, stroke)
+        canvas.restore()
+    }
+}
+
+private fun redPinDrawable(mapView: MapView): BitmapDrawable {
+    val bmp = Bitmap.createBitmap(72, 72, Bitmap.Config.ARGB_8888)
+    val c = Canvas(bmp)
+    val pin = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE53935.toInt() }
+    c.drawCircle(36f, 26f, 17f, pin)
+    val tail = Path()
+    tail.moveTo(21f, 32f)
+    tail.lineTo(51f, 32f)
+    tail.lineTo(36f, 64f)
+    tail.close()
+    c.drawPath(tail, pin)
+    c.drawCircle(36f, 26f, 6.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE })
+    return BitmapDrawable(mapView.context.resources, bmp)
 }
 
 private fun clearOverlays(mapView: MapView) {
@@ -254,13 +319,6 @@ private suspend fun drawRoute(
             title = from.name
         }
     )
-    mapView.overlays.add(
-        Marker(mapView).apply {
-            position = GeoPoint(bLat, bLon)
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            title = (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: "")
-        }
-    )
 
     var w = 180.0; var s = 90.0; var e = -180.0; var n = -90.0
     for (p in full) {
@@ -276,23 +334,17 @@ private suspend fun drawRoute(
     mapView.controller.setCenter(startGeo)
     mapView.invalidate()
     waitManualHeld(manual)
-    kotlinx.coroutines.delay(300)
-
-    mapView.zoomToBoundingBox(bb, false, 120)
-    val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 17.0)
-    val fitCenter = mapView.mapCenter
-    mapView.controller.setZoom(14.2)
-    mapView.controller.setCenter(startGeo)
-    mapView.invalidate()
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
     val elapsed = elapsedMs.coerceAtLeast(0)
     val remaining = (totalMs - elapsed).coerceAtLeast(400)
-    val zoomOutMs = (remaining * 0.22).coerceIn(300.0, 2400.0).toLong()
-    val zoomInMs = (remaining * 0.24).coerceIn(400.0, 2400.0).toLong()
-    val drawMs = (remaining - zoomOutMs - zoomInMs).coerceAtLeast(0)
+    val zoomInMs = (remaining * 0.28).coerceIn(500.0, 2600.0).toLong()
+    val holdMs = minOf(300L, remaining / 4)
+    val drawMs = (remaining - holdMs - zoomInMs).coerceAtLeast(0)
 
-    animateZoomDecel(mapView, GeoPoint(fitCenter.latitude, fitCenter.longitude), fitZoom, zoomOutMs, manual)
+    val plane = AirplaneTipOverlay()
+    mapView.overlays.add(plane)
+    kotlinx.coroutines.delay(holdMs)
 
     if (full.size >= 2) {
         val steps = (drawMs / 40).coerceIn(4L, 900L)
@@ -314,6 +366,14 @@ private suspend fun drawRoute(
                     )
                 )
             }
+            if (partial.isNotEmpty()) {
+                val tip = partial.last()
+                plane.tip = tip
+                plane.bearingDeg = (
+                    if (partial.size >= 2) partial[partial.size - 2].bearingTo(tip)
+                    else 0.0
+                )
+            }
             line.setPoints(partial)
             if (!manual()) {
                 val tip = partial.last()
@@ -327,6 +387,15 @@ private suspend fun drawRoute(
             kotlinx.coroutines.delay(if (drawMs <= 0) 0L else drawMs / steps)
         }
         line.setPoints(full)
+        plane.tip = null
+        mapView.overlays.add(
+            Marker(mapView).apply {
+                position = GeoPoint(bLat, bLon)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                icon = redPinDrawable(mapView)
+                title = (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: "")
+            }
+        )
         mapView.invalidate()
     }
 
