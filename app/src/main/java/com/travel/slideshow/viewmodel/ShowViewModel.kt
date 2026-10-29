@@ -37,6 +37,8 @@ sealed interface ShowStep {
 
 data class RouteState(val uri: Uri, val points: List<List<Double>>)
 
+data class PinState(val lat: Double, val lon: Double, val title: String? = null)
+
 data class Segment(val step: ShowStep, val durMs: Long, val musicIso3: String? = null)
 
 data class UiState(
@@ -52,6 +54,7 @@ data class UiState(
     val message: String? = null,
     val route: RouteState? = null,
     val pastRoutes: List<RouteState> = emptyList(),
+    val visitedPins: List<PinState> = emptyList(),
     val runId: Int = 0,
 )
 
@@ -70,6 +73,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private val manualGate = MutableStateFlow(false)
     private var gestureJob: kotlinx.coroutines.Job? = null
     private val pastRoutesSet = HashSet<Uri>()
+    private val visitedPinSet = HashSet<String>()
     private val stopScan = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastPhotos: List<PhotoItem> = emptyList()
     private var segments: List<Segment> = emptyList()
@@ -268,9 +272,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val root = _state.value.config.photoFolderUri ?: return
         stopScan.set(false)
         pastRoutesSet.clear()
+        visitedPinSet.clear()
         viewModelScope.launch {
             message(null)
-            _state.value = _state.value.copy(step = ShowStep.Scanning(0), pastRoutes = emptyList(), route = null)
+            _state.value = _state.value.copy(step = ShowStep.Scanning(0), pastRoutes = emptyList(), visitedPins = emptyList(), route = null)
             WorldMapData.load(getApplication())
             val items = repo.scan(
                 root,
@@ -388,6 +393,13 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             else cur.copy(pastRoutes = cur.pastRoutes + RouteState(uri, pts))
         }
         pastRoutesSet.add(uri)
+    }
+
+    fun markVisited(lat: Double, lon: Double, title: String? = null) {
+        val key = "%.5f,%.5f".format(lat, lon)
+        if (visitedPinSet.add(key)) {
+            _state.update { it.copy(visitedPins = it.visitedPins + PinState(lat, lon, title)) }
+        }
     }
 
     private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {

@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.model.PhotoItem
+import com.travel.slideshow.viewmodel.PinState
 import com.travel.slideshow.viewmodel.RouteState
 import com.travel.slideshow.viewmodel.ShowStep
 import org.osmdroid.events.MapEventsReceiver
@@ -36,13 +37,24 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
 @Composable
-fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawWorldCountry(mapView, step, manual) }
+fun ShowMap(step: ShowStep.WorldCountry, visitedPins: List<PinState>, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawWorldCountry(mapView, step, visitedPins, manual) }
 }
 
 @Composable
-fun ShowMap(step: ShowStep.LocationMap, pastRoutes: List<RouteState>, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier = Modifier) {
-    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView -> drawLocation(mapView, step.photo, pastRoutes, manual) }
+fun ShowMap(
+    step: ShowStep.LocationMap,
+    pastRoutes: List<RouteState>,
+    visitedPins: List<PinState>,
+    onMapTap: () -> Unit,
+    onGesture: () -> Unit,
+    manual: () -> Boolean,
+    onArrived: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    SingleMapView(step, onMapTap, onGesture, manual, modifier) { mapView ->
+        drawLocation(mapView, step.photo, pastRoutes, visitedPins, manual, onArrived)
+    }
 }
 
 @Composable
@@ -50,17 +62,23 @@ fun ShowMap(
     step: ShowStep.RouteMap,
     routePts: List<List<Double>>?,
     pastRoutes: List<RouteState>,
+    visitedPins: List<PinState>,
     totalSec: Float,
     runId: Int,
     onMapTap: () -> Unit,
     onGesture: () -> Unit,
     manual: () -> Boolean,
+    onArrived: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
     val startedAt = remember(runId, step.photo.uri) { System.currentTimeMillis() }
     SingleMapView(key, onMapTap, onGesture, manual, modifier) {
-        mapView -> drawRoute(mapView, step, routePts, pastRoutes, totalSec, System.currentTimeMillis() - startedAt, manual)
+        mapView ->
+        drawRoute(
+            mapView, step, routePts, pastRoutes, visitedPins, totalSec,
+            System.currentTimeMillis() - startedAt, manual, onArrived
+        )
     }
 }
 
@@ -186,9 +204,10 @@ private suspend fun waitManualHeld(manual: () -> Boolean) {
     while (manual()) kotlinx.coroutines.delay(80)
 }
 
-private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCountry, manual: () -> Boolean) {
+private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCountry, visitedPins: List<PinState>, manual: () -> Boolean) {
     val country = step.country
     clearOverlays(mapView)
+    addVisitedPins(mapView, visitedPins)
     for (ring in country.outerRings) {
         val pts = ring.map { GeoPoint(it[1], it[0]) }
         val poly = Polygon(mapView).apply {
@@ -239,19 +258,44 @@ private fun addPastRouteLines(mapView: MapView, pastRoutes: List<RouteState>, sk
     }
 }
 
-private suspend fun drawLocation(mapView: MapView, photo: PhotoItem, pastRoutes: List<RouteState>, manual: () -> Boolean) {
+private fun addVisitedPins(mapView: MapView, pins: List<PinState>) {
+    if (pins.isEmpty()) return
+    val sharedIcon = redPinDrawable(mapView)
+    for (p in pins) {
+        mapView.overlays.add(
+            Marker(mapView).apply {
+                position = GeoPoint(p.lat, p.lon)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                icon = sharedIcon
+                title = p.title
+            }
+        )
+    }
+}
+
+private suspend fun drawLocation(
+    mapView: MapView,
+    photo: PhotoItem,
+    pastRoutes: List<RouteState>,
+    visitedPins: List<PinState>,
+    manual: () -> Boolean,
+    onArrived: () -> Unit,
+) {
     val lat = photo.lat ?: return
     val lon = photo.lon ?: return
     clearOverlays(mapView)
     addPastRouteLines(mapView, pastRoutes, photo.uri)
+    addVisitedPins(mapView, visitedPins.filterNot { it.lat == lat && it.lon == lon })
     val geo = GeoPoint(lat, lon)
     mapView.overlays.add(
         Marker(mapView).apply {
             position = geo
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            icon = redPinDrawable(mapView)
             title = (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: "")
         }
     )
+    onArrived()
     waitManualHeld(manual)
     mapView.controller.setZoom(4.0)
     mapView.controller.setCenter(geo)
@@ -288,9 +332,11 @@ private suspend fun drawRoute(
     step: ShowStep.RouteMap,
     routePts: List<List<Double>>?,
     pastRoutes: List<RouteState>,
+    visitedPins: List<PinState>,
     totalSec: Float,
     elapsedMs: Long,
     manual: () -> Boolean,
+    onArrived: () -> Unit,
 ) {
     val from = step.from
     val to = step.photo
@@ -301,11 +347,15 @@ private suspend fun drawRoute(
     clearOverlays(mapView)
 
     addPastRouteLines(mapView, pastRoutes, to.uri)
+    addVisitedPins(
+        mapView,
+        visitedPins.filterNot { (it.lat == aLat && it.lon == aLon) || (it.lat == bLat && it.lon == bLon) }
+    )
 
     val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }
     val line = Polyline(mapView)
-    line.setPoints(full)
+    line.setPoints(listOf(full.first()))
     line.outlinePaint.color = 0xFF29B6F6.toInt()
     line.outlinePaint.strokeWidth = 6.0f
     line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
@@ -316,28 +366,50 @@ private suspend fun drawRoute(
         Marker(mapView).apply {
             position = GeoPoint(aLat, aLon)
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            icon = redPinDrawable(mapView)
             title = from.name
         }
     )
 
+    var w = 180.0; var s = 90.0; var e = -180.0; var n = -90.0
+    for (p in full) {
+        w = minOf(w, p.longitude)
+        e = maxOf(e, p.longitude)
+        s = minOf(s, p.latitude)
+        n = maxOf(n, p.latitude)
+    }
+    val bb = BoundingBox(n, e, s, w)
+
     val startGeo = GeoPoint(aLat, aLon)
-    mapView.controller.setZoom(14.2)
+    mapView.controller.setZoom(15.5)
     mapView.controller.setCenter(startGeo)
     mapView.invalidate()
     waitManualHeld(manual)
 
+    mapView.zoomToBoundingBox(bb, false, 120)
+    val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 15.5)
+    val fitCenter = mapView.mapCenter
+    mapView.controller.setZoom(15.5)
+    mapView.controller.setCenter(startGeo)
+    mapView.invalidate()
+
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
     val elapsed = elapsedMs.coerceAtLeast(0)
     val remaining = (totalMs - elapsed).coerceAtLeast(400)
+    val dz = (15.5 - fitZoom).coerceAtLeast(0.0)
+    val zoomOutMs = ((remaining * 0.2) * (dz / 5.0).coerceIn(0.6, 1.6)).coerceIn(500.0, 3200.0).toLong()
     val zoomInMs = (remaining * 0.28).coerceIn(500.0, 2600.0).toLong()
-    val holdMs = minOf(300L, remaining / 4)
-    val drawMs = (remaining - holdMs - zoomInMs).coerceAtLeast(0)
+    val holdMs = minOf(300L, remaining / 6)
+    val drawMs = (remaining - holdMs - zoomOutMs - zoomInMs).coerceAtLeast(0)
 
     val plane = AirplaneTipOverlay()
     mapView.overlays.add(plane)
     kotlinx.coroutines.delay(holdMs)
 
     if (full.size >= 2) {
+        if (dz > 0.01) {
+            animateZoomDecel(mapView, GeoPoint(fitCenter.latitude, fitCenter.longitude), fitZoom, zoomOutMs, manual)
+        }
         val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {
             val t = i.toDouble() / steps
@@ -387,6 +459,7 @@ private suspend fun drawRoute(
                 title = (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: "")
             }
         )
+        onArrived()
         mapView.invalidate()
     }
 
