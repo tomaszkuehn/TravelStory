@@ -6,39 +6,61 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.viewmodel.ShowStep
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.CustomZoomButtonsController
+import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 
 @Composable
-fun ShowMap(step: ShowStep.WorldCountry, modifier: Modifier = Modifier) {
-    SingleMapView(step, modifier) { mapView -> drawWorldCountry(mapView, step) }
+fun ShowMap(step: ShowStep.WorldCountry, onMapTap: () -> Unit, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, modifier) { mapView -> drawWorldCountry(mapView, step) }
 }
 
 @Composable
-fun ShowMap(step: ShowStep.LocationMap, modifier: Modifier = Modifier) {
-    SingleMapView(step, modifier) { mapView -> drawLocation(mapView, step.photo) }
+fun ShowMap(step: ShowStep.LocationMap, onMapTap: () -> Unit, modifier: Modifier = Modifier) {
+    SingleMapView(step, onMapTap, modifier) { mapView -> drawLocation(mapView, step.photo) }
 }
 
 @Composable
-fun ShowMap(step: ShowStep.RouteMap, routePts: List<List<Double>>?, totalSec: Float, modifier: Modifier = Modifier) {
+fun ShowMap(
+    step: ShowStep.RouteMap,
+    routePts: List<List<Double>>?,
+    totalSec: Float,
+    onMapTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val key = listOf(step.photo.uri, routePts?.size ?: -1)
-    SingleMapView(key, modifier) { mapView -> drawRoute(mapView, step, routePts, totalSec) }
+    SingleMapView(key, onMapTap, modifier) { mapView -> drawRoute(mapView, step, routePts, totalSec) }
 }
 
 @Composable
-private fun SingleMapView(key: Any, modifier: Modifier, effect: suspend (MapView) -> Unit) {
+private fun SingleMapView(key: Any, onMapTap: () -> Unit, modifier: Modifier, effect: suspend (MapView) -> Unit) {
     val context = LocalContext.current
+    val tapHandler by rememberUpdatedState(onMapTap)
+    val tapOverlay = remember {
+        MapEventsOverlay(object : MapEventsReceiver {
+            override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                tapHandler()
+                return true
+            }
+
+            override fun longPressHelper(p: GeoPoint?): Boolean = false
+        })
+    }
     val ref = remember { mutableStateOf<MapView?>(null) }
     AndroidView(
         modifier = modifier,
@@ -52,6 +74,8 @@ private fun SingleMapView(key: Any, modifier: Modifier, effect: suspend (MapView
                 zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
                 controller.setZoom(2.0)
                 controller.setCenter(GeoPoint(15.0, 0.0))
+                tag = tapOverlay
+                overlays.add(tapOverlay)
             }.also { ref.value = it }
         }
     )
@@ -62,9 +86,15 @@ private fun SingleMapView(key: Any, modifier: Modifier, effect: suspend (MapView
     }
 }
 
+private fun clearOverlays(mapView: MapView) {
+    val keepOverlay = mapView.tag as? MapEventsOverlay
+    mapView.overlays.clear()
+    if (keepOverlay != null) mapView.overlays.add(keepOverlay)
+}
+
 private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCountry) {
     val country = step.country
-    mapView.overlays.clear()
+    clearOverlays(mapView)
     for (ring in country.outerRings) {
         val pts = ring.map { GeoPoint(it[1], it[0]) }
         val poly = Polygon(mapView).apply {
@@ -103,7 +133,7 @@ private suspend fun drawWorldCountry(mapView: MapView, step: ShowStep.WorldCount
 private suspend fun drawLocation(mapView: MapView, photo: com.travel.slideshow.model.PhotoItem) {
     val lat = photo.lat ?: return
     val lon = photo.lon ?: return
-    mapView.overlays.clear()
+    clearOverlays(mapView)
     val geo = GeoPoint(lat, lon)
     mapView.overlays.add(
         Marker(mapView).apply {
@@ -142,7 +172,7 @@ private suspend fun drawRoute(mapView: MapView, step: ShowStep.RouteMap, routePt
     val aLon = from.lon ?: return
     val bLat = to.lat ?: return
     val bLon = to.lon ?: return
-    mapView.overlays.clear()
+    clearOverlays(mapView)
 
     val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }

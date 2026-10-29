@@ -115,20 +115,21 @@ fun SlideshowScreen(vm: ShowViewModel) {
             val photoUnder = photoLayerPhoto
             if (photoUnder != null) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = photoAlpha.value }) {
-                    PhotoView(photoUnder, vm)
+                    PhotoView(photoUnder, vm) { vm.togglePause() }
                 }
             }
             val mapUnder = mapLayerStep
             if (mapUnder != null) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
                     when (val s = mapUnder) {
-                        is ShowStep.WorldCountry -> ShowMap(s, Modifier.fillMaxSize())
-                        is ShowStep.LocationMap -> ShowMap(s, Modifier.fillMaxSize())
+                        is ShowStep.WorldCountry -> ShowMap(s, { vm.togglePause() }, Modifier.fillMaxSize())
+                        is ShowStep.LocationMap -> ShowMap(s, { vm.togglePause() }, Modifier.fillMaxSize())
                         is ShowStep.RouteMap ->
                             ShowMap(
                                 s,
                                 st.route?.takeIf { it.uri == s.photo.uri }?.points,
                                 st.config.locationMapSec,
+                                { vm.togglePause() },
                                 Modifier.fillMaxSize()
                             )
                         else -> {}
@@ -277,7 +278,7 @@ private fun ScanningView(st: UiState, step: ShowStep.Scanning, vm: ShowViewModel
 }
 
 @Composable
-private fun PhotoView(photo: PhotoItem, vm: ShowViewModel) {
+private fun PhotoView(photo: PhotoItem, vm: ShowViewModel, onPhotoTap: () -> Unit) {
     val threshold = with(LocalDensity.current) { 140.dp.toPx() }
     val dragAccum = remember { mutableFloatStateOf(0f) }
     AnimatedContent(
@@ -294,6 +295,11 @@ private fun PhotoView(photo: PhotoItem, vm: ShowViewModel) {
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { onPhotoTap() },
+                    )
+                }
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
                         onDragStart = { dragAccum.floatValue = 0f },
