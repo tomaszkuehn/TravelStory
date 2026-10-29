@@ -35,7 +35,7 @@ class MusicPlayer(private val context: Context) {
                     .build()
             )
             p.setDataSource(context, playlist[idx])
-            p.isLooping = false
+            p.isLooping = playlist.size <= 1
             p.setOnCompletionListener {
                 if (playlist.isEmpty()) return@setOnCompletionListener
                 idx = (idx + 1) % playlist.size
@@ -183,7 +183,7 @@ object AmbienceSynth {
             .replace(Regex("[^A-Za-z0-9]"), "_")
             .lowercase(Locale.US)
             .take(40)
-        val out = File(dir, "amb_$safe.wav")
+        val out = File(dir, "amb2_$safe.wav")
         if (out.exists() && out.length() > 10_000) return out
         val seed = (iso3 + countryName).hashCode().toLong()
         writeWav(out, generate(seed, DURATION_SEC))
@@ -194,49 +194,80 @@ object AmbienceSynth {
         val rng = java.util.Random(seed)
         val n = seconds * RATE
         val out = FloatArray(n)
-        val rootMidi = 41 + rng.nextInt(12)
+
+        val rootMidi = 45 + rng.nextInt(10)
         val minor = rng.nextBoolean()
         val scale = if (minor) intArrayOf(0, 3, 5, 7, 10) else intArrayOf(0, 2, 4, 7, 9)
-        val chords = listOf(
-            intArrayOf(0, 2, 4), intArrayOf(3, 5, 0), intArrayOf(4, 1, 3), intArrayOf(0, 4, 2)
+        val ext = IntArray(10) { if (it < 5) scale[it] else scale[it - 5] + 12 }
+        val progressions = listOf(
+            intArrayOf(0, 3, 1, 4), intArrayOf(0, 2, 3, 1), intArrayOf(0, 1, 3, 2)
         )
+        val prog = progressions[rng.nextInt(progressions.size)]
         val chordLen = 12.0
+        val fadeIn = 2.0
+        val fadeOut = 2.0
         val chordCount = (seconds / chordLen).toInt() + 1
-        val chordSeq = Array(chordCount) { chords[rng.nextInt(chords.size)] }
 
-        for (i in 0 until n) {
-            val t = i.toDouble() / RATE
-            val ci = (t / chordLen).toInt()
-            val ct = t - ci * chordLen
-            val chord = chordSeq[ci]
-            var v = 0.0
-            for (k in chord.indices) {
-                val midi = rootMidi + scale[chord[k] % scale.size] - 12
-                val f = 440.0 * Math.pow(2.0, (midi - 69) / 12.0)
-                val env = kotlin.math.exp(-(0.06 / chordLen) * ct) * (0.55 - 0.27 * ci)
-                v += 0.11 * env * kotlin.math.sin(2 * Math.PI * f * t)
-            }
-            out[i] = v.toFloat()
-        }
-        var pitchIdx = 2
-        var tNext = rng.nextDouble() * 1.2
-        while (tNext < seconds - 1.0) {
-            val step = scale[rng.nextInt(scale.size)] + if (rng.nextDouble() < 0.25) 7 else 0
-            pitchIdx = ((pitchIdx + step) % scale.size + scale.size) % scale.size
-            val midi = rootMidi + scale[pitchIdx] + if (rng.nextDouble() < 0.5) 12 else 0
+        fun chordTone(midi: Int, t: Double, ct: Double, cl: Double, amp: Double): Double {
             val f = 440.0 * Math.pow(2.0, (midi - 69) / 12.0)
-            val start = (tNext * RATE).toInt()
-            val len = (0.9 * RATE).toInt()
-            for (i in 0 until len) {
-                val t = i.toDouble() / RATE
-                if (start + i >= n) break
-                val env = kotlin.math.exp(-5.5 * t) * (1 - kotlin.math.exp(-140 * t))
-                val s = 0.24 * env * kotlin.math.sin(2 * Math.PI * f * t)
-                out[start + i] = ((out[start + i] + s) / 1.6).toFloat()
-            }
-            tNext += 0.55 + rng.nextDouble() * 1.6
+            val att = if (ct < fadeIn) 0.5 * (1 - kotlin.math.cos(Math.PI * ct / fadeIn)) else 1.0
+            val rel = if (cl - ct < fadeOut) 0.5 * (1 - kotlin.math.cos(Math.PI * (cl - ct) / fadeOut)) else 1.0
+            val env = amp * att * rel
+            val wob = 1.0 + 0.0012 * Math.sin(2 * Math.PI * 0.19 * t)
+            return env * (kotlin.math.sin(2 * Math.PI * f * wob * t) +
+                0.28 * kotlin.math.sin(2 * Math.PI * 2 * f * wob * t))
         }
-        val fade = 3 * RATE
+
+        for (ci in 0 until chordCount) {
+            val startS = ci * chordLen
+            val endS = minOf(seconds.toDouble(), startS + chordLen)
+            if (startS >= seconds) break
+            val chordDeg = ext[prog[ci % prog.size]]
+            val startI = (startS * RATE).toInt()
+            val endI = (endS * RATE).toInt()
+            val ctLen = endS - startS
+            for (i in startI until endI) {
+                val t = i.toDouble() / RATE
+                val ct = t - startS
+                var v = 0.0
+                v += chordTone(rootMidi - 12, t, ct, ctLen, 0.05)
+                v += chordTone(rootMidi + chordDeg, t, ct, ctLen, 0.075)
+                v += chordTone(rootMidi + ext[(prog[ci % prog.size] + 2) % ext.size] + 12, t, ct, ctLen, 0.045)
+                out[i] = (out[i] + v).toFloat()
+            }
+        }
+
+        var deg = 2
+        var beat = 1.2 + rng.nextDouble() * 0.8
+        var tNext = 1.5 + rng.nextDouble()
+        while (tNext < seconds - 2.0) {
+            if (rng.nextDouble() > 0.32) {
+                deg = (deg + (rng.nextInt(3) - 1)).coerceIn(0, ext.size - 1)
+                val midi = rootMidi + ext[deg] + 12
+                val f = 440.0 * Math.pow(2.0, (midi - 69) / 12.0)
+                val start = (tNext * RATE).toInt()
+                val len = (2.2 * RATE).toInt()
+                for (i in 0 until len) {
+                    if (start + i >= n) break
+                    val dt = i.toDouble() / RATE
+                    val env = kotlin.math.exp(-3.4 * dt) * (1 - kotlin.math.exp(-55 * dt))
+                    val s = 0.14 * env * (
+                        kotlin.math.sin(2 * Math.PI * f * dt) +
+                            0.15 * kotlin.math.sin(2 * Math.PI * 2 * f * dt)
+                        )
+                    out[start + i] = out[start + i] + s.toFloat()
+                }
+            }
+            tNext += beat * (1.0 + (rng.nextInt(3) - 1) * 0.5)
+        }
+
+        var peak = 1e-6
+        for (i in 0 until n) peak = maxOf(peak, kotlin.math.abs(out[i].toDouble()))
+        val gain = (0.72 / peak).coerceAtMost(4.0)
+        for (i in 0 until n) {
+            out[i] = (out[i] * gain).coerceIn(-0.98, 0.98).toFloat()
+        }
+        val fade = (1.5 * RATE).toInt()
         for (i in 0 until fade) {
             val g = i.toDouble() / fade
             out[i] = (out[i] * g).toFloat()
