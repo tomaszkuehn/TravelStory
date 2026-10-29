@@ -88,19 +88,6 @@ fun SlideshowScreen(vm: ShowViewModel) {
 
         InfoChip(st, Modifier.align(Alignment.TopCenter))
 
-        if (st.paused && !idleLike) {
-            Text(
-                "⏸ PAUZA",
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 22.sp,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-        }
-
         ControlsOverlay(
             vm = vm,
             st = st,
@@ -281,6 +268,14 @@ fun ControlsOverlay(vm: ShowViewModel, st: UiState, visible: Boolean, modifier: 
             horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (st.paused) {
+                Icon(
+                    Icons.Filled.Pause,
+                    contentDescription = null,
+                    tint = Color(0xFFFFB74D),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
             IconButton(onClick = { vm.togglePause() }) {
                 Icon(
                     if (st.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
