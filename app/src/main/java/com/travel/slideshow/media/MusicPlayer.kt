@@ -127,6 +127,7 @@ class MusicResolver(private val context: Context) {
                 }
             } catch (e: Exception) { }
         }
+        tracks.shuffle()
         return if (tracks.isNotEmpty()) tracks else fallbackFor(iso3, countryName)
     }
 
