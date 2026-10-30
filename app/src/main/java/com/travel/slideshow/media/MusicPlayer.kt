@@ -8,11 +8,17 @@ import android.provider.DocumentsContract
 import java.io.File
 import java.util.Locale
 
+/**
+ * Must be used from the main thread only: MediaPlayer is not thread-safe and its
+ * callbacks are delivered on the thread that created it.
+ */
 class MusicPlayer(private val context: Context) {
 
     private var playlist: List<Uri> = emptyList()
     private var idx = 0
     private var currentPlayer: MediaPlayer? = null
+    private var prepared = false
+    private var failures = 0
     private var volumeFraction = 0.8f
     private var paused = false
 
@@ -21,13 +27,16 @@ class MusicPlayer(private val context: Context) {
         if (tracks.isEmpty()) return
         playlist = tracks
         idx = 0
+        failures = 0
         startCurrent()
     }
 
     private fun startCurrent() {
+        releaseCurrent()
         if (playlist.isEmpty()) return
+        val p = MediaPlayer()
+        currentPlayer = p
         try {
-            val p = MediaPlayer()
             p.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -36,49 +45,69 @@ class MusicPlayer(private val context: Context) {
             )
             p.setDataSource(context, playlist[idx])
             p.isLooping = playlist.size <= 1
-            p.setOnCompletionListener {
-                if (playlist.isEmpty()) return@setOnCompletionListener
+            p.setOnPreparedListener { mp ->
+                if (mp !== currentPlayer) return@setOnPreparedListener
+                prepared = true
+                failures = 0
+                mp.setVolume(volumeFraction, volumeFraction)
+                if (!paused) mp.start()
+            }
+            p.setOnCompletionListener { mp ->
+                if (mp !== currentPlayer || playlist.isEmpty()) return@setOnCompletionListener
                 idx = (idx + 1) % playlist.size
                 startCurrent()
             }
-            p.prepare()
-            val f = volumeFraction
-            p.setVolume(f, f)
-            p.start()
-            currentPlayer = p
-            paused = false
-        } catch (e: Exception) {
-            if (idx + 1 < playlist.size) {
-                idx++
-                startCurrent()
+            p.setOnErrorListener { mp, _, _ ->
+                if (mp === currentPlayer) skipBroken()
+                true
             }
+            p.prepareAsync()
+        } catch (e: Exception) {
+            skipBroken()
         }
     }
 
-    fun pause() {
-        runCatching { currentPlayer?.pause() }
-        paused = true
+    private fun skipBroken() {
+        failures++
+        if (failures >= playlist.size) {
+            stop()
+            return
+        }
+        idx = (idx + 1) % playlist.size
+        startCurrent()
     }
 
-    fun resume() {
-        runCatching { currentPlayer?.start() }
-        paused = false
-    }
-
-    fun setVolume(fraction: Float) {
-        volumeFraction = fraction
-        runCatching { currentPlayer?.setVolume(fraction, fraction) }
-    }
-
-    fun stop() {
+    private fun releaseCurrent() {
         currentPlayer?.let { p ->
             runCatching {
+                p.setOnPreparedListener(null)
                 p.setOnCompletionListener(null)
-                p.stop()
+                p.setOnErrorListener(null)
                 p.release()
             }
         }
         currentPlayer = null
+        prepared = false
+    }
+
+    /** Pause state survives [play]/[stop], so a track started while the show is paused waits for [resume]. */
+    fun pause() {
+        paused = true
+        if (prepared) runCatching { currentPlayer?.pause() }
+    }
+
+    fun resume() {
+        paused = false
+        if (prepared) runCatching { currentPlayer?.start() }
+    }
+
+    fun setVolume(fraction: Float) {
+        volumeFraction = fraction
+        if (prepared) runCatching { currentPlayer?.setVolume(fraction, fraction) }
+    }
+
+    fun stop() {
+        releaseCurrent()
         playlist = emptyList()
         idx = 0
     }

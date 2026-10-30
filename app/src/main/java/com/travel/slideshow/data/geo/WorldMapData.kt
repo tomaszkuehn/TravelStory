@@ -66,7 +66,7 @@ object CountryInfo {
         "TGO" to "TG", "THA" to "TH", "TJK" to "TJ", "TKM" to "TM", "TLS" to "TL", "TTO" to "TT",
         "TUN" to "TN", "TUR" to "TR", "TWN" to "TW", "TZA" to "TZ", "UGA" to "UG", "UKR" to "UA",
         "URY" to "UY", "USA" to "US", "UZB" to "UZ", "VEN" to "VE", "VNM" to "VN", "VUT" to "VU",
-        "YEM" to "YE", "ZAF" to "ZA", "ZMB" to "ZW", "ZWE" to "ZW",
+        "YEM" to "YE", "ZAF" to "ZA", "ZMB" to "ZM", "ZWE" to "ZW",
     )
 
     fun iso2(iso3: String): String = iso3To2[iso3] ?: ""

@@ -8,6 +8,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.travel.slideshow.data.PhotoRepository
+import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.data.geo.CountryShape
 import com.travel.slideshow.data.geo.Geo
 import com.travel.slideshow.data.geo.WorldMapData
@@ -15,6 +16,7 @@ import com.travel.slideshow.media.MusicPlayer
 import com.travel.slideshow.media.MusicResolver
 import com.travel.slideshow.model.PhotoItem
 import com.travel.slideshow.model.ShowConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.math.min
 
@@ -81,8 +84,15 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private var blockReplayUri: String? = null
     private var driver: Job? = null
     private var pausedBeforeSettings = false
+    private var pausedForBackground = false
+    private var pendingReset = false
+    private var pendingRebuild = false
     private var musicRoot: Uri? = null
+    private var musicJob: Job? = null
+    private var currentMusicIso: String? = null
+    // Touched only on the main thread; network work hops to IO and back.
     private val routeCache = HashMap<String, List<List<Double>>>()
+    private val routeInFlight = HashSet<String>()
 
     init {
         musicRoot = prefs.getString(PREF_MUSIC_ROOT, null)?.toUriOrNull()
@@ -115,31 +125,77 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             .putFloat(PREF_TRANSITION, cfg.transitionSec)
             .apply()
         musicPlayer.setVolume(cfg.musicVolumePct / 100f * 0.85f)
-        if (lastPhotos.isNotEmpty() &&
-            (old.onlyWithLocation != cfg.onlyWithLocation || old.newestFirst != cfg.newestFirst)
+        if (lastPhotos.isEmpty()) return
+        // Segment changes are applied when settings close, not on every slider tick.
+        if (old.onlyWithLocation != cfg.onlyWithLocation || old.newestFirst != cfg.newestFirst) {
+            pendingReset = true
+        } else if (old.photoDisplaySec != cfg.photoDisplaySec ||
+            old.locationMapSec != cfg.locationMapSec ||
+            old.worldMapSec != cfg.worldMapSec ||
+            old.distanceKmThreshold != cfg.distanceKmThreshold
         ) {
+            pendingRebuild = true
+        }
+        if (!_state.value.settingsVisible) applyPendingSegmentChanges()
+    }
+
+    private fun applyPendingSegmentChanges() {
+        val reset = pendingReset
+        val rebuild = pendingRebuild
+        pendingReset = false
+        pendingRebuild = false
+        if (lastPhotos.isEmpty() || (!reset && !rebuild)) return
+        if (reset) {
             driver?.cancel()
-            musicPlayer.stop()
+            stopMusic()
+            lastPhotos = PhotoRepository.sortByDate(lastPhotos, _state.value.config.newestFirst)
             segments = buildSegments(lastPhotos)
             segIdx = 0
-            pausedGate.value = false
-            _state.value = _state.value.copy(paused = false, step = ShowStep.Idle, message = null)
+            setPaused(false)
+            resetTrail()
+            _state.value = _state.value.copy(step = ShowStep.Idle, message = null)
+            return
+        }
+        val photoUri = currentPhotoUri()
+        val running = isRunning()
+        segments = buildSegments(lastPhotos)
+        if (running && segments.isNotEmpty()) {
+            blockReplayUri = null
+            segIdx = segments.indexOfFirst { (it.step as? ShowStep.Photo)?.photo?.uri == photoUri }
+                .coerceAtLeast(0)
+            relaunch(syncMusic = true)
         }
     }
+
+    /** Photo shown by the current segment, or the next one when on a map leading to it. */
+    private fun currentPhotoUri(): Uri? =
+        (segIdx until segments.size).firstNotNullOfOrNull { (segments[it].step as? ShowStep.Photo)?.photo?.uri }
+
+    private fun isRunning(): Boolean = driver?.isActive == true
 
     fun setSettingsVisible(visible: Boolean) {
         if (visible) {
             pausedBeforeSettings = _state.value.paused
-            if (!_state.value.paused) togglePause()
+            if (isRunning() && !_state.value.paused) setPaused(true)
+            _state.value = _state.value.copy(settingsVisible = true)
+            return
         }
-        _state.value = _state.value.copy(settingsVisible = visible)
-        if (!visible && pausedBeforeSettings && _state.value.paused) {
-            restoreAfterSettings()
+        _state.value = _state.value.copy(settingsVisible = false)
+        applyPendingSegmentChanges()
+        if (isRunning() && !pausedBeforeSettings && _state.value.paused) setPaused(false)
+    }
+
+    fun onAppBackground() {
+        if (isRunning() && !_state.value.paused) {
+            setPaused(true)
+            pausedForBackground = true
         }
     }
 
-    private fun restoreAfterSettings() {
-        togglePause()
+    fun onAppForeground() {
+        if (!pausedForBackground) return
+        pausedForBackground = false
+        if (_state.value.paused && !_state.value.settingsVisible) setPaused(false)
     }
 
     val manualHold: StateFlow<Boolean> get() = manualGate
@@ -155,17 +211,24 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun togglePause() {
         val nowPaused = !_state.value.paused
-        pausedGate.value = nowPaused
-        _state.value = _state.value.copy(paused = nowPaused)
-        if (nowPaused) musicPlayer.pause() else musicPlayer.resume()
+        // Taps on the idle/finished screen must not leave a pause that a later Start inherits.
+        if (nowPaused && !isRunning()) return
+        setPaused(nowPaused)
+    }
+
+    private fun setPaused(paused: Boolean) {
+        pausedGate.value = paused
+        _state.value = _state.value.copy(paused = paused)
+        if (paused) musicPlayer.pause() else musicPlayer.resume()
     }
 
     fun start() { restartAll() }
 
     fun restartAll() {
-        musicPlayer.stop()
+        stopMusic()
         driver?.cancel()
         segIdx = 0
+        setPaused(false)
         relaunch()
     }
 
@@ -248,10 +311,12 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             config = _state.value.config.copy(photoFolderUri = uri),
             photoFolderName = folderName(uri),
         )
-        musicPlayer.stop()
+        stopMusic()
         driver?.cancel()
         segments = emptyList()
+        lastPhotos = emptyList()
         segIdx = 0
+        setPaused(false)
         _state.value = _state.value.copy(step = ShowStep.Idle, itemCount = 0)
     }
 
@@ -271,11 +336,12 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     fun prepare() {
         val root = _state.value.config.photoFolderUri ?: return
         stopScan.set(false)
-        pastRoutesSet.clear()
-        visitedPinSet.clear()
+        pendingReset = false
+        pendingRebuild = false
+        resetTrail()
         viewModelScope.launch {
             message(null)
-            _state.value = _state.value.copy(step = ShowStep.Scanning(0), pastRoutes = emptyList(), visitedPins = emptyList(), route = null)
+            _state.value = _state.value.copy(step = ShowStep.Scanning(0))
             WorldMapData.load(getApplication())
             val items = repo.scan(
                 root,
@@ -358,7 +424,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     val d = if (prevLat != null && prevLon != null) {
                         Geo.haversineKm(prevLat, prevLon, p.lat, p.lon)
                     } else Double.MAX_VALUE
-                    if (d > ROUTE_MIN_KM && anchors.last() != null) {
+                    if (d >= cfg.distanceKmThreshold && anchors.last() != null) {
                         travelSteps.add(mutableListOf(Segment(ShowStep.RouteMap(anchors.last()!!, p), locMs)))
                         isTravel = true
                     }
@@ -387,22 +453,29 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
         "%.5f,%.5f|%.5f,%.5f".format(lat1, lon1, lat2, lon2)
 
+    private fun routeKey(step: ShowStep.RouteMap): String? {
+        val from = step.from
+        val to = step.photo
+        if (from.lat == null || from.lon == null || to.lat == null || to.lon == null) return null
+        return routeKey(from.lat, from.lon, to.lat, to.lon)
+    }
+
+    /** Only fetches and caches; the route joins the trail once the map arrives (see [onArrived]). */
     private fun fetchRoute(stepIn: ShowStep.RouteMap) {
         val from = stepIn.from
         val to = stepIn.photo
-        if (from.lat == null || from.lon == null || to.lat == null || to.lon == null) return
-        val key = routeKey(from.lat, from.lon, to.lat, to.lon)
+        val key = routeKey(stepIn) ?: return
         val cached = routeCache[key]
         if (cached != null) {
-            addPastRoute(to.uri, cached)
             _state.update { it.copy(route = RouteState(to.uri, cached)) }
             return
         }
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val pts = osrmRoute(from.lat!!, from.lon!!, to.lat!!, to.lon!!)
-                ?: listOf(listOf(from.lon, from.lat), listOf(to.lon, to.lat))
+        if (!routeInFlight.add(key)) return
+        viewModelScope.launch {
+            val pts = withContext(Dispatchers.IO) { osrmRoute(from.lat!!, from.lon!!, to.lat!!, to.lon!!) }
+                ?: listOf(listOf(from.lon!!, from.lat!!), listOf(to.lon!!, to.lat!!))
+            routeInFlight.remove(key)
             routeCache[key] = pts
-            addPastRoute(to.uri, pts)
             _state.update { it.copy(route = RouteState(to.uri, pts)) }
         }
     }
@@ -415,11 +488,77 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         pastRoutesSet.add(uri)
     }
 
-    fun markVisited(lat: Double, lon: Double, title: String? = null) {
-        val key = "%.5f,%.5f".format(lat, lon)
-        if (visitedPinSet.add(key)) {
-            _state.update { it.copy(visitedPins = it.visitedPins + PinState(lat, lon, title)) }
+    /** Called by the map when a location/route step reaches its destination pin. */
+    fun onArrived(step: ShowStep) {
+        val photo = when (step) {
+            is ShowStep.LocationMap -> step.photo
+            is ShowStep.RouteMap -> {
+                routeKey(step)?.let { routeCache[it] }?.let { addPastRoute(step.photo.uri, it) }
+                step.photo
+            }
+            else -> return
         }
+        markVisited(photo)
+    }
+
+    private fun markVisited(photo: PhotoItem) {
+        val pin = pinFor(photo) ?: return
+        if (visitedPinSet.add(pinKey(pin))) {
+            _state.update { it.copy(visitedPins = it.visitedPins + pin) }
+        }
+    }
+
+    private fun pinFor(photo: PhotoItem): PinState? {
+        val lat = photo.lat ?: return null
+        val lon = photo.lon ?: return null
+        val title = (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " } ?: "") + (photo.countryName ?: "")
+        return PinState(lat, lon, title)
+    }
+
+    private fun pinKey(pin: PinState): String = "%.5f,%.5f".format(pin.lat, pin.lon)
+
+    private fun resetTrail() = rebuildTrail(0)
+
+    /** Trail (routes + pins) as it would look after playing segments [0, upTo). */
+    private fun rebuildTrail(upTo: Int) {
+        pastRoutesSet.clear()
+        visitedPinSet.clear()
+        val routes = mutableListOf<RouteState>()
+        val pins = mutableListOf<PinState>()
+        for (i in 0 until min(upTo, segments.size)) {
+            val photo = when (val st = segments[i].step) {
+                is ShowStep.LocationMap -> st.photo
+                is ShowStep.RouteMap -> {
+                    routeKey(st)?.let { routeCache[it] }?.let { pts ->
+                        if (pastRoutesSet.add(st.photo.uri)) routes += RouteState(st.photo.uri, pts)
+                    }
+                    st.photo
+                }
+                else -> null
+            } ?: continue
+            val pin = pinFor(photo) ?: continue
+            if (visitedPinSet.add(pinKey(pin))) pins += pin
+        }
+        _state.update { it.copy(pastRoutes = routes, visitedPins = pins, route = null) }
+    }
+
+    private fun playMusicFor(iso: String, force: Boolean) {
+        if (!_state.value.config.musicEnabled) return
+        if (!force && iso == currentMusicIso) return
+        currentMusicIso = iso
+        musicJob?.cancel()
+        musicJob = viewModelScope.launch {
+            val name = WorldMapData.byIso(iso)?.name ?: ""
+            val tracks = withContext(Dispatchers.IO) { musicResolver.tracksFor(iso, name, musicRoot) }
+            musicPlayer.play(tracks)
+        }
+    }
+
+    private fun stopMusic() {
+        musicJob?.cancel()
+        musicJob = null
+        currentMusicIso = null
+        musicPlayer.stop()
     }
 
     private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
@@ -453,12 +592,13 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun relaunch(syncMusic: Boolean = false) {
         var nextIdx = segIdx
         driver?.cancel()
+        if (nextIdx >= segments.size) nextIdx = 0
+        rebuildTrail(nextIdx)
         val startedRunId = _state.value.runId + 1
         _state.value = _state.value.copy(runId = startedRunId)
         musicPlayer.setVolume(_state.value.config.musicVolumePct / 100f * 0.85f)
         driver = viewModelScope.launch {
             _state.value = _state.value.copy(stopped = false)
-            if (nextIdx >= segments.size) nextIdx = 0
             var first = true
             for (i in nextIdx until segments.size) {
                 segIdx = i
@@ -467,25 +607,18 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 (segments.getOrNull(i + 1)?.step as? ShowStep.RouteMap)?.let { if (it.photo.uri != (seg.step as? ShowStep.RouteMap)?.photo?.uri) fetchRoute(it) }
                 if (first) {
                     first = false
-                    if (syncMusic) {
-                        val iso = (seg.step as? ShowStep.Photo)?.photo?.iso3
-                        if (iso != null && _state.value.config.musicEnabled) {
-                            val shape = WorldMapData.byIso(iso)
-                            val name = shape?.name ?: ""
-                            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                musicPlayer.play(musicResolver.tracksFor(iso, name, musicRoot))
-                            }
+                    if (syncMusic && seg.musicIso3 == null) {
+                        val iso = when (val st = seg.step) {
+                            is ShowStep.Photo -> st.photo.iso3
+                            is ShowStep.LocationMap -> st.photo.iso3
+                            is ShowStep.RouteMap -> st.photo.iso3
+                            else -> null
                         }
+                        // Jumps inside the same country keep the current track.
+                        if (iso != null) playMusicFor(iso, force = false)
                     }
                 }
-                if (seg.musicIso3 != null && _state.value.config.musicEnabled) {
-                    val iso = seg.musicIso3
-                    val shape = WorldMapData.byIso(iso)
-                    val name = shape?.name ?: ""
-                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        musicPlayer.play(musicResolver.tracksFor(iso, name, musicRoot))
-                    }
-                }
+                if (seg.musicIso3 != null) playMusicFor(seg.musicIso3, force = true)
                 _state.value = _state.value.copy(message = null, step = seg.step)
                 pausableDelay(seg.durMs)
             }
@@ -511,8 +644,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun setFinished() {
+        // skipNext() can finish the show from outside the driver; stop it from overwriting the step.
+        driver?.cancel()
         _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished)
-        musicPlayer.stop()
+        stopMusic()
     }
 
     private fun loadConfig(): ShowConfig {
@@ -535,7 +670,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         driver?.cancel()
-        musicPlayer.stop()
+        stopMusic()
         super.onCleared()
     }
 
@@ -551,6 +686,5 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_DESC = "desc"
         private const val PREF_ONLY_LOC = "only_loc"
         private const val PREF_TRANSITION = "transition_sec"
-        private const val ROUTE_MIN_KM = 1.0
     }
 }

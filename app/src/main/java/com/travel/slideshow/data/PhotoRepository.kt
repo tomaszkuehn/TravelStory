@@ -73,9 +73,7 @@ class PhotoRepository(private val context: Context) {
                 }
             }
         }
-        val cmp = compareBy { p: PhotoItem -> p.dateTakenMs ?: Long.MAX_VALUE }
-        if (newestFirst) result.sortWith(cmp.reversed()) else result.sortWith(cmp)
-        result
+        sortByDate(result, newestFirst)
     }
 
     private class ExifMeta(val date: Long?, val lat: Double?, val lon: Double?)
@@ -184,6 +182,11 @@ class PhotoRepository(private val context: Context) {
     }
 
     companion object {
+        fun sortByDate(items: List<PhotoItem>, newestFirst: Boolean): List<PhotoItem> {
+            val cmp = compareBy { p: PhotoItem -> p.dateTakenMs ?: Long.MAX_VALUE }
+            return items.sortedWith(if (newestFirst) cmp.reversed() else cmp)
+        }
+
         private val PROJECTION = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,

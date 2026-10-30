@@ -3,6 +3,7 @@ package com.travel.slideshow
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -17,6 +18,18 @@ import com.travel.slideshow.ui.SettingsScreen
 import com.travel.slideshow.viewmodel.ShowViewModel
 
 class MainActivity : ComponentActivity() {
+    private val vm: ShowViewModel by viewModels()
+
+    override fun onStart() {
+        super.onStart()
+        vm.onAppForeground()
+    }
+
+    override fun onStop() {
+        vm.onAppBackground()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)

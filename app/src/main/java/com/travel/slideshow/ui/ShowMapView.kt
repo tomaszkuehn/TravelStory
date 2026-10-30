@@ -20,7 +20,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
-import com.travel.slideshow.model.PhotoItem
 import com.travel.slideshow.viewmodel.PinState
 import com.travel.slideshow.viewmodel.RouteState
 import com.travel.slideshow.viewmodel.ShowStep
@@ -47,21 +46,23 @@ fun ShowMap(
     onMapTap: () -> Unit,
     onGesture: () -> Unit,
     manual: () -> Boolean,
-    onArrived: (PhotoItem) -> Unit,
+    onArrived: (ShowStep) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // The effect restarts when the OSRM route arrives, but elapsed time is measured from the
+    // start of the step so the route animation still fits the segment.
     val key: Any = when (step) {
-        is ShowStep.RouteMap -> listOf(step.photo.uri, routePts?.size ?: -1)
+        is ShowStep.RouteMap -> listOf(step, routePts?.size ?: -1)
         else -> step
     }
-    SingleMapView(key, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
+    SingleMapView(key, step, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
         when (step) {
             is ShowStep.WorldCountry -> drawWorldCountry(mv, step, visitedPins, manual)
-            is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, manual, { onArrived(step.photo) })
+            is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, manual, { onArrived(step) })
             is ShowStep.RouteMap ->
                 drawRoute(
                     mv, step, routePts, pastRoutes, visitedPins, totalSec, elapsedMs, manual,
-                    { onArrived(step.photo) }
+                    { onArrived(step) }
                 )
             else -> {}
         }
@@ -69,7 +70,7 @@ fun ShowMap(
 }
 
 @Composable
-private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView, Long) -> Unit) {
+private fun SingleMapView(key: Any, startKey: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView, Long) -> Unit) {
     val context = LocalContext.current
     val tapHandler by rememberUpdatedState(onMapTap)
     val gestureHandler by rememberUpdatedState(onGesture)
@@ -103,7 +104,7 @@ private fun SingleMapView(key: Any, onMapTap: () -> Unit, onGesture: () -> Unit,
         }
     )
     val mv = ref.value
-    val startedAt = remember(key) { System.currentTimeMillis() }
+    val startedAt = remember(startKey) { System.currentTimeMillis() }
     DisposableEffect(Unit) { onDispose { ref.value = null } }
     LaunchedEffect(key, mv) {
         mv?.let { effect(it, System.currentTimeMillis() - startedAt) }

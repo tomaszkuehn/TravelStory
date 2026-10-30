@@ -141,13 +141,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
                         { vm.togglePause() },
                         vm::onMapGesture,
                         { vm.manualHold.value },
-                        { photo ->
-                            vm.markVisited(
-                                photo.lat ?: 0.0,
-                                photo.lon ?: 0.0,
-                                (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: ""),
-                            )
-                        },
+                        vm::onArrived,
                         Modifier.fillMaxSize(),
                     )
                 }
