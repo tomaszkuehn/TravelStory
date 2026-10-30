@@ -36,8 +36,16 @@ sealed interface ShowStep {
     data class LocationMap(val photo: PhotoItem, val revisit: Boolean = false) : ShowStep
     data class RouteMap(val from: PhotoItem, val photo: PhotoItem) : ShowStep
     data class Photo(val photo: PhotoItem) : ShowStep
-    /** Title card "Dzień N — place"; [localDayMs] is local midnight encoded as UTC, [photo] names the place. */
-    data class DayTitle(val dayNumber: Int, val localDayMs: Long, val photo: PhotoItem?) : ShowStep
+    /**
+     * Title card "Dzień N — place"; [localDayMs] is local midnight encoded as UTC, [photo] names the place,
+     * [backdrop] is the day's first still photo, shown faded behind the text.
+     */
+    data class DayTitle(
+        val dayNumber: Int,
+        val localDayMs: Long,
+        val photo: PhotoItem?,
+        val backdrop: PhotoItem? = null,
+    ) : ShowStep
     data object Finished : ShowStep
 }
 
@@ -228,7 +236,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     val manualHold: StateFlow<Boolean> get() = manualGate
 
-    fun onMapGesture() {
+    /** Map or photo gesture: the show holds until 5 s after the last one. */
+    fun onUserGesture() {
         manualGate.value = true
         gestureJob?.cancel()
         gestureJob = viewModelScope.launch {
@@ -301,6 +310,64 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         target?.let { jumpTo(it) }
+    }
+
+    /** Jumps to the start of the next calendar day (its title card or the maps leading to it). */
+    fun skipNextDay() {
+        if (segments.isEmpty()) return
+        val cur = dayAt(segIdx)
+        val next = (segIdx + 1 until segments.size).firstOrNull { i ->
+            photoDay(i)?.let { it != cur } == true
+        } ?: return
+        blockReplayUri = null
+        jumpTo(dayStartIdx(next))
+    }
+
+    /** Jumps to the start of the previous calendar day; on the first day, back to its start. */
+    fun skipPreviousDay() {
+        if (segments.isEmpty()) return
+        val cur = dayAt(segIdx)
+        val photoIdx = (segIdx until segments.size).firstOrNull { segments[it].step is ShowStep.Photo }
+            ?: prevPhotoIdx(segIdx) ?: return
+        val curStart = dayStartIdx(photoIdx)
+        val prev = (curStart - 1 downTo 0).firstOrNull { i -> photoDay(i)?.let { it != cur } == true }
+        blockReplayUri = null
+        jumpTo(prev?.let { dayStartIdx(it) } ?: curStart)
+    }
+
+    private fun photoDay(i: Int): Long? = (segments[i].step as? ShowStep.Photo)?.photo?.let { dayOf(it) }
+
+    /** Day being shown at [i]: the card's day, or that of the next dated photo. */
+    private fun dayAt(i: Int): Long? {
+        (segments.getOrNull(i)?.step as? ShowStep.DayTitle)?.let { return it.localDayMs / DAY_MS }
+        return (i until segments.size).firstNotNullOfOrNull { photoDay(it) }
+    }
+
+    /** First segment of the day run containing the photo at [photoIdx], including its card and lead-in maps. */
+    private fun dayStartIdx(photoIdx: Int): Int {
+        val day = photoDay(photoIdx)
+        var first = photoIdx
+        var i = photoIdx - 1
+        while (i >= 0) {
+            when (val st = segments[i].step) {
+                is ShowStep.Photo -> {
+                    val d = dayOf(st.photo)
+                    if (d != null && day != null && d != day) break
+                    first = i
+                }
+                is ShowStep.DayTitle -> {
+                    if (day == null || st.localDayMs / DAY_MS == day) return i
+                    break
+                }
+                else -> {}
+            }
+            i--
+        }
+        while (first > 0 && segments[first - 1].step.let {
+                it is ShowStep.WorldCountry || it is ShowStep.LocationMap || it is ShowStep.RouteMap
+            }
+        ) first--
+        return first
     }
 
     private fun prevPhotoIdx(from: Int): Int? =
@@ -503,9 +570,11 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             prev = d
         }
         val placeFor = HashMap<Long, PhotoItem>()
+        val backdropFor = HashMap<Long, PhotoItem>()
         for (p in photos) {
             val d = dayOf(p) ?: continue
             if (p.lat != null && p.lon != null && d !in placeFor) placeFor[d] = p
+            if (!p.isVideo && d !in backdropFor) backdropFor[d] = p
         }
         val out = ArrayList<Segment>(segs.size + days.size)
         var lastDay: Long? = null
@@ -518,7 +587,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                         it is ShowStep.WorldCountry || it is ShowStep.LocationMap || it is ShowStep.RouteMap
                     }
                 ) at--
-                out.add(at, Segment(ShowStep.DayTitle(dayNumber[d] ?: 1, d * DAY_MS, placeFor[d]), DAY_TITLE_MS))
+                out.add(at, Segment(ShowStep.DayTitle(dayNumber[d] ?: 1, d * DAY_MS, placeFor[d], backdropFor[d]), DAY_TITLE_MS))
                 lastDay = d
             }
             out += seg
@@ -719,6 +788,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                             is ShowStep.Photo -> st.photo.iso3
                             is ShowStep.LocationMap -> st.photo.iso3
                             is ShowStep.RouteMap -> st.photo.iso3
+                            is ShowStep.DayTitle -> st.photo?.iso3
                             else -> null
                         }
                         // Jumps inside the same country keep the current track.

@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay
@@ -65,7 +67,22 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import coil.compose.AsyncImage
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.geometry.isSpecified
+import android.os.Build
+import androidx.compose.ui.draw.blur
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.positionChanged
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.model.PhotoItem
@@ -149,7 +166,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
             val photoUnder = photoLayerPhoto
             if (photoUnder != null && showPhotoLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = photoAlpha.value }) {
-                    PhotoView(photoUnder, st.paused, vm) { vm.togglePause() }
+                    PhotoView(photoUnder, st.paused, (st.config.photoDisplaySec * 1000).toLong(), vm) { vm.togglePause() }
                 }
             }
             val mapUnder = mapLayerStep
@@ -165,7 +182,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
                         st.config.locationMapSec,
                         st.runId,
                         { vm.togglePause() },
-                        vm::onMapGesture,
+                        vm::onUserGesture,
                         { vm.manualHold.value },
                         vm::onArrived,
                         Modifier.fillMaxSize(),
@@ -232,15 +249,15 @@ private fun InfoChip(st: UiState, modifier: Modifier) {
     if (flag == null && place == null) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
             .statusBarsPadding()
             .padding(top = 10.dp)
             .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .padding(horizontal = 9.dp, vertical = 2.dp)
     ) {
-        flag?.let { Text(it, fontSize = 30.sp) }
-        place?.let { Text(it, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Medium) }
+        flag?.let { Text(it, fontSize = 20.sp) }
+        place?.let { Text(it, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
     }
 }
 
@@ -253,12 +270,13 @@ private fun DayTitleView(card: ShowStep.DayTitle, names: Map<String, String>) {
             .apply { timeZone = TimeZone.getTimeZone("UTC") }
             .format(Date(card.localDayMs))
     }
+    Box(Modifier.fillMaxSize().background(Color.Black))
+    card.backdrop?.let { DayBackdrop(it) }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
             .padding(24.dp)
     ) {
         Text("Dzień ${card.dayNumber}", color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.Bold)
@@ -274,6 +292,38 @@ private fun DayTitleView(card: ShowStep.DayTitle, names: Map<String, String>) {
         Text(date, color = Color(0xFFBDBDBD), fontSize = 16.sp, modifier = Modifier.padding(top = 14.dp))
     }
 }
+
+/** Faded first photo of the day; one narrower than 70% of the screen is enlarged to that width and cropped. */
+@Composable
+private fun DayBackdrop(photo: PhotoItem) {
+    val painter = rememberAsyncImagePainter(
+        ImageRequest.Builder(LocalContext.current)
+            .data(photo.uri)
+            .crossfade(true)
+            .build()
+    )
+    val imgSize = (painter.state as? AsyncImagePainter.State.Success)?.painter?.intrinsicSize
+    BoxWithConstraints(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
+        if (imgSize == null || !imgSize.isSpecified || imgSize.width <= 0f || imgSize.height <= 0f) {
+            Image(painter, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().graphicsLayer { alpha = DAY_BACKDROP_ALPHA })
+            return@BoxWithConstraints
+        }
+        val aspect = imgSize.width / imgSize.height
+        val fitW = minOf(maxWidth, maxHeight * aspect)
+        val w = maxOf(fitW, maxWidth * DAY_BACKDROP_MIN_WIDTH)
+        Image(
+            painter,
+            contentDescription = null,
+            contentScale = ContentScale.FillBounds,
+            modifier = Modifier
+                .requiredSize(w, w / aspect)
+                .graphicsLayer { alpha = DAY_BACKDROP_ALPHA }
+        )
+    }
+}
+
+private const val DAY_BACKDROP_MIN_WIDTH = 0.7f
+private const val DAY_BACKDROP_ALPHA = 0.4f
 
 private fun stFlag(photo: PhotoItem): Pair<String, String>? {
     val iso = photo.iso3 ?: return null
@@ -360,54 +410,155 @@ private fun ScanningView(st: UiState, step: ShowStep.Scanning, vm: ShowViewModel
 }
 
 @Composable
-private fun PhotoView(photo: PhotoItem, paused: Boolean, vm: ShowViewModel, onPhotoTap: () -> Unit) {
+private fun PhotoView(photo: PhotoItem, paused: Boolean, displayMs: Long, vm: ShowViewModel, onPhotoTap: () -> Unit) {
     val threshold = with(LocalDensity.current) { 140.dp.toPx() }
-    val dragAccum = remember { mutableFloatStateOf(0f) }
+    val hold by vm.manualHold.collectAsState()
     AnimatedContent(
         targetState = photo,
         transitionSpec = { fadeIn(tween(700)) togetherWith fadeOut(tween(500)) },
         label = "photo"
     ) { p ->
+        // Pinch zoom / pan of this photo; a new photo starts unzoomed.
+        var scale by remember(p.uri) { mutableFloatStateOf(1f) }
+        var offset by remember(p.uri) { mutableStateOf(Offset.Zero) }
         Box(Modifier.fillMaxSize()) {
-            if (p.isVideo) {
-                VideoView(p, paused)
-            } else {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(p.uri)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = p.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    }
+            ) {
+                // While the user explores the photo the show holds, so the clip / Ken Burns wait too.
+                if (p.isVideo) {
+                    VideoView(p, paused || hold)
+                } else {
+                    StillPhoto(p, paused || hold, displayMs)
+                }
             }
             // Gestures sit on top so the video surface cannot swallow them.
             Box(
                 Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { onPhotoTap() },
-                    )
-                }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { dragAccum.floatValue = 0f },
-                        onHorizontalDrag = { change, amount ->
-                            change.consume()
-                            dragAccum.floatValue += amount
-                        },
-                        onDragEnd = {
-                            if (dragAccum.floatValue <= -threshold) vm.skipNext()
-                            else if (dragAccum.floatValue >= threshold) vm.skipPrevious()
+                    .pointerInput(p.uri) {
+                        detectTapGestures(
+                            onTap = { onPhotoTap() },
+                            onDoubleTap = {
+                                scale = 1f
+                                offset = Offset.Zero
+                                vm.onUserGesture()
+                            },
+                        )
+                    }
+                    .pointerInput(p.uri) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var drag = 0f
+                            var transformed = false
+                            do {
+                                val event = awaitPointerEvent()
+                                val fingers = event.changes.count { it.pressed }
+                                val zoom = event.calculateZoom()
+                                val pan = event.calculatePan()
+                                if (fingers >= 2 || scale > 1f) {
+                                    if (zoom != 1f || pan != Offset.Zero) {
+                                        transformed = true
+                                        scale = (scale * zoom).coerceIn(1f, MAX_PHOTO_ZOOM)
+                                        val maxX = (scale - 1f) * size.width / 2f
+                                        val maxY = (scale - 1f) * size.height / 2f
+                                        offset = Offset(
+                                            (offset.x + pan.x).coerceIn(-maxX, maxX),
+                                            (offset.y + pan.y).coerceIn(-maxY, maxY),
+                                        )
+                                        vm.onUserGesture()
+                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    }
+                                } else {
+                                    drag += pan.x
+                                    if (kotlin.math.abs(drag) > viewConfiguration.touchSlop) {
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
+                            // A one-finger swipe on an unzoomed photo still skips.
+                            if (!transformed && scale <= 1f) {
+                                if (drag <= -threshold) vm.skipNext()
+                                else if (drag >= threshold) vm.skipPrevious()
+                            }
                         }
-                    )
-                }
+                    }
             )
         }
     }
 }
+
+private const val MAX_PHOTO_ZOOM = 5f
+
+/**
+ * A photo too narrow for the screen (portrait on a landscape screen, or one that would fill at most
+ * half the width) sits over a blurred, dimmed copy of itself and slowly zooms in and drifts down.
+ */
+@Composable
+private fun StillPhoto(photo: PhotoItem, paused: Boolean, displayMs: Long) {
+    val painter = rememberAsyncImagePainter(
+        ImageRequest.Builder(LocalContext.current)
+            .data(photo.uri)
+            .crossfade(true)
+            .build()
+    )
+    val imgSize = (painter.state as? AsyncImagePainter.State.Success)?.painter?.intrinsicSize
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val known = imgSize != null && imgSize.isSpecified && imgSize.width > 0f && imgSize.height > 0f
+        val portraitOnLandscape = known && imgSize!!.height > imgSize.width && maxWidth > maxHeight
+        // Any photo that fitted to the screen would take at most half its width, on either screen orientation.
+        val narrow = known && maxHeight * (imgSize!!.width / imgSize.height) <= maxWidth / 2
+        if (!portraitOnLandscape && !narrow) {
+            Image(painter, photo.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+        } else {
+            val heightPx = with(LocalDensity.current) { maxHeight.toPx() }
+            val progress = remember(photo.uri) { Animatable(0f) }
+            LaunchedEffect(photo.uri, paused) {
+                if (paused) return@LaunchedEffect
+                val left = 1f - progress.value
+                progress.animateTo(1f, tween((displayMs * left).toInt().coerceAtLeast(1), easing = LinearEasing))
+            }
+            Image(
+                painter,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        // Blur needs Android 12; older devices get the dimmed copy only.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Modifier.blur(36.dp) else Modifier
+                    )
+                    .graphicsLayer { alpha = 0.45f }
+            )
+            Image(
+                painter,
+                contentDescription = photo.name,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val t = progress.value
+                        val scale = 1f + KB_ZOOM * t
+                        scaleX = scale
+                        scaleY = scale
+                        // Drift within the room the zoom adds, towards the bottom of the photo.
+                        val room = (scale - 1f) / 2f * heightPx
+                        translationY = -room * t
+                    }
+            )
+        }
+    }
+}
+
+/** Ken Burns zoom reached at the end of the display time. */
+private const val KB_ZOOM = 0.12f
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -486,6 +637,12 @@ fun ControlsOverlay(vm: ShowViewModel, st: UiState, visible: Boolean, modifier: 
             }
             IconButton(onClick = { vm.skipPrevious() }) {
                 Icon(Icons.Filled.SkipPrevious, contentDescription = "Poprzednie", tint = Color.White)
+            }
+            IconButton(onClick = { vm.skipPreviousDay() }) {
+                Icon(Icons.Filled.FastRewind, contentDescription = "Poprzedni dzień", tint = Color(0xFF81D4FA))
+            }
+            IconButton(onClick = { vm.skipNextDay() }) {
+                Icon(Icons.Filled.FastForward, contentDescription = "Następny dzień", tint = Color(0xFF81D4FA))
             }
             IconButton(onClick = { vm.restartCountry() }) {
                 Icon(Icons.Filled.Replay, contentDescription = "Od początku bieżącego państwa", tint = Color(0xFFFFB74D))
