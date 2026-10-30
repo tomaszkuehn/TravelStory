@@ -16,7 +16,11 @@ Aplikacja Android do prezentowania zdjęć z podróży na tablecie/TV, z animacj
 - **Sterowanie**: tap = pauza/wznowienie (obsługiwany też na mapie i zdjęciu), pasek dolny: ▶/⏸, ⏭ następne, ⏮ poprzednie, replay bieżącego państwa, restart całości, ustawienia. Przesunięcie w lewo na zdjęciu = następne, w prawo = poprzednie; cofanie najpierw powtarza blok map danego zdjęcia (mapa lokalizacji/trasa/wstęp państwa), a dopiero potem wraca do poprzedniego zdjęcia. Ustawienia dostępne zawsze (ikona w prawym górnym rogu).
 - **Ręczne przeglądanie mapy**: pan/zoom na mapie działa zawsze — w trakcie przeglądania automat nie przeskakuje dalej; powrót do sekwencji po 5 s od ostatniej akcji na mapie.
 - **Zatrzymanie skanowania** w trakcie — do pokazu trafiają zdjęcia przeskanowane do tej pory.
-- **Opcje**: przerwa między zdjęciami, czas mapy lokalizacji, czas fazy „mapa świata”, próg dystansu (km), głośność, kolejność (od najstarszych/najnowszych), pomijanie zdjęć bez GPS, czas przejścia mapa↔zdjęcie.
+- **Filmy**: krótkie klipy (mp4/mov/3gp/mkv/webm/m4v) wplatane między zdjęcia (ExoPlayer, bez kontrolek); lokalizacja i data z metadanych filmu; czas = długość klipu, ucinany do limitu z ustawień; muzyka ściszana na czas filmu.
+- **Nazwy miejsc**: reverse geocoding [Nominatim](https://nominatim.openstreetmap.org) (1 zapytanie/s, siatka ~1 km, cache na dysku `places.json`) — nazwa miejscowości obok flagi na mapie i zdjęciu.
+- **Płynna zmiana muzyki**: przy zmianie państwa poprzedni utwór wycisza się, a nowy narasta (crossfade ~1.8 s) zamiast twardego przełączenia.
+- **Plansze dni**: przy zmianie dnia kalendarzowego (czas lokalny z EXIF) karta „Dzień 3 — Florencja” z datą; numeracja zaczyna się od nowa po przerwie dłuższej niż 3 dni (osobne wyjazdy w jednym folderze).
+- **Opcje**: przerwa między zdjęciami, czas mapy lokalizacji, czas fazy „mapa świata”, próg dystansu (km), głośność, kolejność (od najstarszych/najnowszych), pomijanie zdjęć bez GPS, czas przejścia mapa↔zdjęcie, filmy on/off i ich maks. długość, plansze dni, nazwy miejsc.
 
 ## Wymagania
 

@@ -38,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -57,6 +58,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.travel.slideshow.data.geo.CountryInfo
@@ -64,6 +72,11 @@ import com.travel.slideshow.model.PhotoItem
 import com.travel.slideshow.viewmodel.ShowStep
 import com.travel.slideshow.viewmodel.ShowViewModel
 import com.travel.slideshow.viewmodel.UiState
+import com.travel.slideshow.viewmodel.placeOf
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -89,6 +102,19 @@ fun SlideshowScreen(vm: ShowViewModel) {
         var showPhotoLayer by remember { mutableStateOf(false) }
         val mapAlpha = remember { Animatable(0f) }
         val photoAlpha = remember { Animatable(0f) }
+        var dayCard by remember { mutableStateOf<ShowStep.DayTitle?>(null) }
+        val dayAlpha = remember { Animatable(0f) }
+
+        LaunchedEffect(st.step) {
+            val s = st.step
+            if (s is ShowStep.DayTitle) {
+                dayCard = s
+                dayAlpha.animateTo(1f, fadeSpec)
+            } else if (dayCard != null) {
+                dayAlpha.animateTo(0f, fadeSpec)
+                dayCard = null
+            }
+        }
 
         LaunchedEffect(st.step) {
             when (val s = st.step) {
@@ -123,7 +149,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
             val photoUnder = photoLayerPhoto
             if (photoUnder != null && showPhotoLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = photoAlpha.value }) {
-                    PhotoView(photoUnder, vm) { vm.togglePause() }
+                    PhotoView(photoUnder, st.paused, vm) { vm.togglePause() }
                 }
             }
             val mapUnder = mapLayerStep
@@ -144,6 +170,11 @@ fun SlideshowScreen(vm: ShowViewModel) {
                         vm::onArrived,
                         Modifier.fillMaxSize(),
                     )
+                }
+            }
+            dayCard?.let { card ->
+                Box(Modifier.fillMaxSize().graphicsLayer { alpha = dayAlpha.value }) {
+                    DayTitleView(card, st.placeNames)
                 }
             }
             when (val s = st.step) {
@@ -187,21 +218,61 @@ fun SlideshowScreen(vm: ShowViewModel) {
 
 @Composable
 private fun InfoChip(st: UiState, modifier: Modifier) {
-    val (flag, _) = when (val step = st.step) {
-        is ShowStep.WorldCountry -> CountryInfo.flagEmoji(step.country.iso3) to step.country.name
-        is ShowStep.LocationMap -> stFlag(step.photo)
-        is ShowStep.Photo -> stFlag(step.photo)
+    val photo = when (val step = st.step) {
+        is ShowStep.LocationMap -> step.photo
+        is ShowStep.RouteMap -> step.photo
+        is ShowStep.Photo -> step.photo
         else -> null
-    } ?: return
-    Text(
-        flag,
-        fontSize = 30.sp,
+    }
+    val flag = when (val step = st.step) {
+        is ShowStep.WorldCountry -> CountryInfo.flagEmoji(step.country.iso3)
+        else -> photo?.let { stFlag(it)?.first }
+    }
+    val place = if (st.config.placeNames) placeOf(photo, st.placeNames) else null
+    if (flag == null && place == null) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier
             .statusBarsPadding()
             .padding(top = 10.dp)
             .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
             .padding(horizontal = 12.dp, vertical = 4.dp)
-    )
+    ) {
+        flag?.let { Text(it, fontSize = 30.sp) }
+        place?.let { Text(it, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Medium) }
+    }
+}
+
+@Composable
+private fun DayTitleView(card: ShowStep.DayTitle, names: Map<String, String>) {
+    val place = placeOf(card.photo, names) ?: card.photo?.countryName
+    val date = remember(card.localDayMs) {
+        // localDayMs is wall-clock midnight encoded as UTC, so format it in UTC.
+        SimpleDateFormat("EEEE, d MMMM yyyy", Locale("pl"))
+            .apply { timeZone = TimeZone.getTimeZone("UTC") }
+            .format(Date(card.localDayMs))
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .padding(24.dp)
+    ) {
+        Text("Dzień ${card.dayNumber}", color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.Bold)
+        place?.let {
+            val flag = card.photo?.let { p -> stFlag(p)?.first }
+            Text(
+                "— $it" + (flag?.let { f -> "  $f" } ?: ""),
+                color = Color(0xFFFFB74D),
+                fontSize = 28.sp,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+        Text(date, color = Color(0xFFBDBDBD), fontSize = 16.sp, modifier = Modifier.padding(top = 14.dp))
+    }
 }
 
 private fun stFlag(photo: PhotoItem): Pair<String, String>? {
@@ -228,7 +299,8 @@ private fun IdleView(st: UiState, vm: ShowViewModel) {
         )
         st.itemCount.takeIf { it > 0 }?.let {
             Text(
-                "${it} zdjęć (z lokalizacją: ${st.withLocation})",
+                "${it} plików (z lokalizacją: ${st.withLocation}" +
+                    (if (st.videoCount > 0) ", filmy: ${st.videoCount})" else ")"),
                 color = Color(0xFF8BC34A),
                 fontSize = 14.sp,
                 modifier = Modifier.padding(top = 4.dp)
@@ -288,7 +360,7 @@ private fun ScanningView(st: UiState, step: ShowStep.Scanning, vm: ShowViewModel
 }
 
 @Composable
-private fun PhotoView(photo: PhotoItem, vm: ShowViewModel, onPhotoTap: () -> Unit) {
+private fun PhotoView(photo: PhotoItem, paused: Boolean, vm: ShowViewModel, onPhotoTap: () -> Unit) {
     val threshold = with(LocalDensity.current) { 140.dp.toPx() }
     val dragAccum = remember { mutableFloatStateOf(0f) }
     AnimatedContent(
@@ -296,16 +368,25 @@ private fun PhotoView(photo: PhotoItem, vm: ShowViewModel, onPhotoTap: () -> Uni
         transitionSpec = { fadeIn(tween(700)) togetherWith fadeOut(tween(500)) },
         label = "photo"
     ) { p ->
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(p.uri)
-                .crossfade(true)
-                .build(),
-            contentDescription = p.name,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
+        Box(Modifier.fillMaxSize()) {
+            if (p.isVideo) {
+                VideoView(p, paused)
+            } else {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(p.uri)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = p.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            // Gestures sit on top so the video surface cannot swallow them.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
                     detectTapGestures(
                         onTap = { onPhotoTap() },
                     )
@@ -323,8 +404,34 @@ private fun PhotoView(photo: PhotoItem, vm: ShowViewModel, onPhotoTap: () -> Uni
                         }
                     )
                 }
-        )
+            )
+        }
     }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+private fun VideoView(photo: PhotoItem, paused: Boolean) {
+    val context = LocalContext.current
+    val player = remember(photo.uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(photo.uri))
+            prepare()
+        }
+    }
+    LaunchedEffect(player, paused) { player.playWhenReady = !paused }
+    DisposableEffect(player) { onDispose { player.release() } }
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                useController = false
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                setShutterBackgroundColor(android.graphics.Color.BLACK)
+            }
+        },
+        update = { it.player = player },
+        modifier = Modifier.fillMaxSize(),
+    )
 }
 
 @Composable

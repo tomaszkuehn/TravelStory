@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import java.io.File
 import java.util.Locale
@@ -22,18 +24,80 @@ class MusicPlayer(private val context: Context) {
     private var volumeFraction = 0.8f
     private var paused = false
 
-    fun play(tracks: List<Uri>) {
-        stop()
+    // Effective volume = volumeFraction * duckLevel * gain; ramps are advanced by [tick].
+    private var gain = 1f
+    private var fadingPlayer: MediaPlayer? = null
+    private var fadingGain = 0f
+    private var duckLevel = 1f
+    private var duckTarget = 1f
+    private val handler = Handler(Looper.getMainLooper())
+    private var ticking = false
+    private val tickRunnable = Runnable { tick() }
+
+    /** Starts [tracks]; with [crossfade] the previous music fades out while the new one fades in. */
+    fun play(tracks: List<Uri>, crossfade: Boolean = true) {
+        val old = currentPlayer
+        if (crossfade && old != null && prepared) {
+            releaseFading()
+            fadingPlayer = old.also { detach(it) }
+            fadingGain = gain
+            currentPlayer = null
+            prepared = false
+        }
+        stopPlaylist()
         if (tracks.isEmpty()) return
         playlist = tracks
         idx = 0
         failures = 0
-        startCurrent()
+        startCurrent(fadeIn = crossfade)
+        ensureTicking()
     }
 
-    private fun startCurrent() {
+    /** Lowers music under a video clip's own sound. */
+    fun setDucked(ducked: Boolean) {
+        duckTarget = if (ducked) DUCK_LEVEL else 1f
+        ensureTicking()
+    }
+
+    private fun ensureTicking() {
+        if (ticking || paused) return
+        ticking = true
+        handler.postDelayed(tickRunnable, TICK_MS)
+    }
+
+    private fun tick() {
+        ticking = false
+        if (paused) return
+        var busy = false
+        if (duckLevel != duckTarget) {
+            val step = TICK_MS.toFloat() / DUCK_MS
+            duckLevel = if (duckLevel < duckTarget) minOf(duckTarget, duckLevel + step) else maxOf(duckTarget, duckLevel - step)
+            busy = true
+        }
+        if (prepared && gain < 1f) {
+            gain = minOf(1f, gain + TICK_MS.toFloat() / FADE_MS)
+            busy = true
+        } else if (!prepared && currentPlayer != null && gain < 1f) {
+            busy = true // still preparing; keep the clock alive for the fade-in
+        }
+        fadingPlayer?.let {
+            fadingGain -= TICK_MS.toFloat() / FADE_MS
+            if (fadingGain <= 0f) releaseFading() else busy = true
+        }
+        applyVolumes()
+        if (busy) ensureTicking()
+    }
+
+    private fun applyVolumes() {
+        val base = volumeFraction * duckLevel
+        if (prepared) runCatching { currentPlayer?.setVolume(base * gain, base * gain) }
+        fadingPlayer?.let { p -> runCatching { p.setVolume(base * fadingGain, base * fadingGain) } }
+    }
+
+    private fun startCurrent(fadeIn: Boolean = false) {
         releaseCurrent()
         if (playlist.isEmpty()) return
+        gain = if (fadeIn) 0f else 1f
         val p = MediaPlayer()
         currentPlayer = p
         try {
@@ -49,8 +113,9 @@ class MusicPlayer(private val context: Context) {
                 if (mp !== currentPlayer) return@setOnPreparedListener
                 prepared = true
                 failures = 0
-                mp.setVolume(volumeFraction, volumeFraction)
+                applyVolumes()
                 if (!paused) mp.start()
+                ensureTicking()
             }
             p.setOnCompletionListener { mp ->
                 if (mp !== currentPlayer || playlist.isEmpty()) return@setOnCompletionListener
@@ -77,39 +142,63 @@ class MusicPlayer(private val context: Context) {
         startCurrent()
     }
 
+    private fun detach(p: MediaPlayer) {
+        runCatching {
+            p.setOnPreparedListener(null)
+            p.setOnCompletionListener(null)
+            p.setOnErrorListener(null)
+        }
+    }
+
     private fun releaseCurrent() {
         currentPlayer?.let { p ->
-            runCatching {
-                p.setOnPreparedListener(null)
-                p.setOnCompletionListener(null)
-                p.setOnErrorListener(null)
-                p.release()
-            }
+            detach(p)
+            runCatching { p.release() }
         }
         currentPlayer = null
         prepared = false
     }
 
+    private fun releaseFading() {
+        fadingPlayer?.let { p -> runCatching { p.release() } }
+        fadingPlayer = null
+    }
+
     /** Pause state survives [play]/[stop], so a track started while the show is paused waits for [resume]. */
     fun pause() {
         paused = true
+        // A half-finished fade-out is not worth resuming later.
+        releaseFading()
         if (prepared) runCatching { currentPlayer?.pause() }
     }
 
     fun resume() {
         paused = false
         if (prepared) runCatching { currentPlayer?.start() }
+        ensureTicking()
     }
 
     fun setVolume(fraction: Float) {
         volumeFraction = fraction
-        if (prepared) runCatching { currentPlayer?.setVolume(fraction, fraction) }
+        applyVolumes()
     }
 
-    fun stop() {
+    private fun stopPlaylist() {
         releaseCurrent()
         playlist = emptyList()
         idx = 0
+    }
+
+    fun stop() {
+        releaseFading()
+        stopPlaylist()
+    }
+
+    companion object {
+        private const val TICK_MS = 40L
+        private const val FADE_MS = 1800
+        private const val DUCK_MS = 600
+        private const val DUCK_LEVEL = 0.2f
     }
 }
 

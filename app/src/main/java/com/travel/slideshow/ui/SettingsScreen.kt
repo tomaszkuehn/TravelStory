@@ -117,6 +117,19 @@ fun SettingsScreen(vm: ShowViewModel) {
                     })
                 }
 
+                ToggleRow("Pokazuj filmy", "krótkie klipy z folderu, muzyka ściszana na czas filmu", cfg.showVideos) { on ->
+                    vm.updateConfig { it.copy(showVideos = on) }
+                }
+                ToggleRow("Plansze dni podróży", "„Dzień 3 — Florencja” przy zmianie dnia", cfg.dayTitles) { on ->
+                    vm.updateConfig { it.copy(dayTitles = on) }
+                }
+                ToggleRow("Nazwy miejsc", "z internetu (OpenStreetMap Nominatim), zapamiętywane", cfg.placeNames) { on ->
+                    vm.updateConfig { it.copy(placeNames = on) }
+                }
+
+                SliderRow("Maks. długość filmu", cfg.maxVideoSec, 3f..60f, "s") {
+                    vm.updateConfig { c -> c.copy(maxVideoSec = it) }
+                }
                 SliderRow("Długość pokazu zdjęcia", cfg.photoDisplaySec, 1f..30f, "s") {
                     vm.updateConfig { c -> c.copy(photoDisplaySec = it) }
                 }
@@ -152,6 +165,17 @@ fun SettingsScreen(vm: ShowViewModel) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ToggleRow(title: String, hint: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(hint, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

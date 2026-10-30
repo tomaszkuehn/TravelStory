@@ -10,3 +10,5 @@ captures/
 *.apk.idsig
 .ijfw/
 ijfw/
+AGENTS.md
+CLAUDE.md

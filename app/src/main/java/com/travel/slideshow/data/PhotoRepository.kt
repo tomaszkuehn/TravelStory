@@ -1,6 +1,7 @@
 package com.travel.slideshow.data
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.exifinterface.media.ExifInterface
@@ -47,16 +48,21 @@ class PhotoRepository(private val context: Context) {
                         stack.addLast(docId)
                         continue
                     }
-                    if (!isImage(name, mime)) continue
+                    val video = isVideo(name, mime)
+                    if (!video && !isImage(name, mime)) continue
                     val docUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
-                    val meta = readExif(docUri, sdf)
+                    val meta = if (video) readVideoMeta(docUri) else readExif(docUri, sdf)
+                    val fallback = lastMod.takeIf { it > 0 }
                     result.add(
                         PhotoItem(
                             uri = docUri,
                             name = name,
-                            dateTakenMs = meta.date ?: lastMod.takeIf { it > 0 },
+                            dateTakenMs = meta.instant ?: fallback,
                             lat = meta.lat,
                             lon = meta.lon,
+                            localTimeMs = meta.local ?: fallback?.let { it + localOffset(it) },
+                            isVideo = video,
+                            durationMs = meta.durationMs,
                         )
                     )
                     onProgress(result.size)
@@ -76,18 +82,62 @@ class PhotoRepository(private val context: Context) {
         sortByDate(result, newestFirst)
     }
 
-    private class ExifMeta(val date: Long?, val lat: Double?, val lon: Double?)
+    private class MediaMeta(
+        val instant: Long?,
+        val local: Long?,
+        val lat: Double?,
+        val lon: Double?,
+        val durationMs: Long? = null,
+    )
 
-    private fun readExif(uri: Uri, sdf: SimpleDateFormat): ExifMeta {
+    private val noMeta = MediaMeta(null, null, null, null)
+
+    /** Offset of the device time zone; best guess when a file carries no zone of its own. */
+    private fun localOffset(ms: Long): Long = TimeZone.getDefault().getOffset(ms).toLong()
+
+    private fun readVideoMeta(uri: Uri): MediaMeta {
+        val mmr = MediaMetadataRetriever()
+        return try {
+            mmr.setDataSource(context, uri)
+            val duration = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            // ISO-6709, e.g. "+52.2297+021.0122/"
+            val loc = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
+            val m = loc?.let { Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""").find(it) }
+            var lat = m?.groupValues?.get(1)?.toDoubleOrNull()
+            var lon = m?.groupValues?.get(2)?.toDoubleOrNull()
+            if (lat == 0.0 && lon == 0.0) { lat = null; lon = null }
+            // e.g. "20231015T143000.000Z" (UTC)
+            val instant = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
+                ?.takeIf { it.length >= 15 && !it.startsWith("1904") }
+                ?.let { raw ->
+                    runCatching {
+                        SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.US)
+                            .apply { timeZone = TimeZone.getTimeZone("UTC") }
+                            .parse(raw.substring(0, 15))?.time
+                    }.getOrNull()
+                }
+            MediaMeta(instant, instant?.let { it + localOffset(it) }, lat, lon, duration)
+        } catch (e: Exception) {
+            noMeta
+        } finally {
+            runCatching { mmr.release() }
+        }
+    }
+
+    private fun readExif(uri: Uri, sdf: SimpleDateFormat): MediaMeta {
         return try {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: return ExifMeta(null, null, null)
+                ?: return noMeta
             val ex = ExifInterface(java.io.ByteArrayInputStream(bytes))
             val dateSrc = ex.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
                 ?: ex.getAttribute(ExifInterface.TAG_DATETIME)
-            val date = runCatching {
+            // EXIF date is wall-clock time; parsing it as UTC keeps the local calendar day.
+            val local = runCatching {
                 dateSrc?.let { if (it.length >= 19) sdf.parse(it.substring(0, 19))?.time else null }
             }.getOrNull()
+            val offsetMs = ex.getAttribute(ExifInterface.TAG_OFFSET_TIME_ORIGINAL)
+                ?.let { parseOffsetMs(it) }
+            val instant = local?.let { it - (offsetMs ?: localOffset(it)) }
             val latRef = ex.getAttribute(ExifInterface.TAG_GPS_LATITUDE_REF)
             val lonRef = ex.getAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF)
             var lat: Double? = null
@@ -108,10 +158,19 @@ class PhotoRepository(private val context: Context) {
                 lat = null
                 lon = null
             }
-            ExifMeta(date, lat, lon)
+            MediaMeta(instant, local, lat, lon)
         } catch (e: Exception) {
-            ExifMeta(null, null, null)
+            noMeta
         }
+    }
+
+    /** "+02:00" / "-0530" → milliseconds. */
+    private fun parseOffsetMs(raw: String): Long? {
+        val m = Regex("""^([+-])(\d{2}):?(\d{2})$""").find(raw.trim()) ?: return null
+        val sign = if (m.groupValues[1] == "-") -1 else 1
+        val h = m.groupValues[2].toLong()
+        val min = m.groupValues[3].toLong()
+        return sign * (h * 3_600_000 + min * 60_000)
     }
 
     private fun manualGps(ex: ExifInterface, latRef: String?, lonRef: String?): Pair<Double, Double>? {
@@ -181,11 +240,19 @@ class PhotoRepository(private val context: Context) {
             low.endsWith(".webp") || low.endsWith(".heic") || low.endsWith(".heif")
     }
 
+    private fun isVideo(name: String, mime: String): Boolean {
+        if (mime.startsWith("video/")) return true
+        val low = name.lowercase()
+        return VIDEO_EXT.any { low.endsWith(it) }
+    }
+
     companion object {
         fun sortByDate(items: List<PhotoItem>, newestFirst: Boolean): List<PhotoItem> {
             val cmp = compareBy { p: PhotoItem -> p.dateTakenMs ?: Long.MAX_VALUE }
             return items.sortedWith(if (newestFirst) cmp.reversed() else cmp)
         }
+
+        private val VIDEO_EXT = listOf(".mp4", ".mov", ".3gp", ".mkv", ".webm", ".m4v")
 
         private val PROJECTION = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,

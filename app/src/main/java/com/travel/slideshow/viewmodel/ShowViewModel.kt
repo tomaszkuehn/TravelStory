@@ -8,6 +8,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.travel.slideshow.data.PhotoRepository
+import com.travel.slideshow.data.PlaceResolver
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.data.geo.CountryShape
 import com.travel.slideshow.data.geo.Geo
@@ -35,7 +36,16 @@ sealed interface ShowStep {
     data class LocationMap(val photo: PhotoItem, val revisit: Boolean = false) : ShowStep
     data class RouteMap(val from: PhotoItem, val photo: PhotoItem) : ShowStep
     data class Photo(val photo: PhotoItem) : ShowStep
+    /** Title card "Dzień N — place"; [localDayMs] is local midnight encoded as UTC, [photo] names the place. */
+    data class DayTitle(val dayNumber: Int, val localDayMs: Long, val photo: PhotoItem?) : ShowStep
     data object Finished : ShowStep
+}
+
+/** Reverse-geocoded town for [photo], once known. */
+fun placeOf(photo: PhotoItem?, names: Map<String, String>): String? {
+    val lat = photo?.lat ?: return null
+    val lon = photo.lon ?: return null
+    return names[PlaceResolver.key(lat, lon)]
 }
 
 data class RouteState(val uri: Uri, val points: List<List<Double>>)
@@ -50,6 +60,7 @@ data class UiState(
     val paused: Boolean = false,
     val itemCount: Int = 0,
     val withLocation: Int = 0,
+    val videoCount: Int = 0,
     val config: ShowConfig = ShowConfig(),
     val settingsVisible: Boolean = false,
     val photoFolderName: String? = null,
@@ -58,6 +69,8 @@ data class UiState(
     val route: RouteState? = null,
     val pastRoutes: List<RouteState> = emptyList(),
     val visitedPins: List<PinState> = emptyList(),
+    /** PlaceResolver.key → town name. */
+    val placeNames: Map<String, String> = emptyMap(),
     val runId: Int = 0,
 )
 
@@ -68,6 +81,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = PhotoRepository(app)
     private val musicPlayer = MusicPlayer(app)
     private val musicResolver = MusicResolver(app)
+    private val places = PlaceResolver(app)
+    private var geocodeJob: Job? = null
 
     private val _state = MutableStateFlow(UiState(config = loadConfig()))
     val state: StateFlow<UiState> = _state
@@ -123,16 +138,27 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             .putBoolean(PREF_DESC, cfg.newestFirst)
             .putBoolean(PREF_ONLY_LOC, cfg.onlyWithLocation)
             .putFloat(PREF_TRANSITION, cfg.transitionSec)
+            .putBoolean(PREF_VIDEOS, cfg.showVideos)
+            .putFloat(PREF_VIDEO_MAX, cfg.maxVideoSec)
+            .putBoolean(PREF_DAY_TITLES, cfg.dayTitles)
+            .putBoolean(PREF_PLACES, cfg.placeNames)
             .apply()
         musicPlayer.setVolume(cfg.musicVolumePct / 100f * 0.85f)
+        if (old.placeNames != cfg.placeNames) {
+            if (cfg.placeNames) startGeocoding() else geocodeJob?.cancel()
+        }
         if (lastPhotos.isEmpty()) return
         // Segment changes are applied when settings close, not on every slider tick.
-        if (old.onlyWithLocation != cfg.onlyWithLocation || old.newestFirst != cfg.newestFirst) {
+        if (old.onlyWithLocation != cfg.onlyWithLocation || old.newestFirst != cfg.newestFirst ||
+            old.showVideos != cfg.showVideos
+        ) {
             pendingReset = true
         } else if (old.photoDisplaySec != cfg.photoDisplaySec ||
             old.locationMapSec != cfg.locationMapSec ||
             old.worldMapSec != cfg.worldMapSec ||
-            old.distanceKmThreshold != cfg.distanceKmThreshold
+            old.distanceKmThreshold != cfg.distanceKmThreshold ||
+            old.maxVideoSec != cfg.maxVideoSec ||
+            old.dayTitles != cfg.dayTitles
         ) {
             pendingRebuild = true
         }
@@ -150,6 +176,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             stopMusic()
             lastPhotos = PhotoRepository.sortByDate(lastPhotos, _state.value.config.newestFirst)
             segments = buildSegments(lastPhotos)
+            startGeocoding()
             segIdx = 0
             setPaused(false)
             resetTrail()
@@ -159,6 +186,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val photoUri = currentPhotoUri()
         val running = isRunning()
         segments = buildSegments(lastPhotos)
+        startGeocoding()
         if (running && segments.isNotEmpty()) {
             blockReplayUri = null
             segIdx = segments.indexOfFirst { (it.step as? ShowStep.Photo)?.photo?.uri == photoUri }
@@ -315,6 +343,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         driver?.cancel()
         segments = emptyList()
         lastPhotos = emptyList()
+        geocodeJob?.cancel()
         segIdx = 0
         setPaused(false)
         _state.value = _state.value.copy(step = ShowStep.Idle, itemCount = 0)
@@ -352,7 +381,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             }
             val stopped = stopScan.get()
             val located = items.count { it.iso3 != null }
-            _state.update { it.copy(itemCount = items.size, withLocation = located) }
+            val videos = items.count { it.isVideo }
+            _state.update { it.copy(itemCount = items.size, withLocation = located, videoCount = videos) }
             if (items.isEmpty()) {
                 lastPhotos = emptyList()
                 _state.update {
@@ -365,6 +395,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             }
             lastPhotos = items
             segments = buildSegments(items)
+            startGeocoding()
             _state.update {
                 it.copy(
                     step = ShowStep.Idle,
@@ -391,9 +422,11 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun buildSegments(photos: List<PhotoItem>): List<Segment> {
         val cfg = _state.value.config
         val segs = mutableListOf<Segment>()
-        val filtered =
-            if (cfg.onlyWithLocation) photos.filter { it.lat != null && it.lon != null } else photos
+        val filtered = photos
+            .filter { cfg.showVideos || !it.isVideo }
+            .filter { !cfg.onlyWithLocation || (it.lat != null && it.lon != null) }
         val photoMs = (cfg.photoDisplaySec * 1000).toLong().coerceAtLeast(600)
+        val maxVideoMs = (cfg.maxVideoSec * 1000).toLong().coerceAtLeast(1500)
         val locMs = (cfg.locationMapSec * 1000).toLong().coerceAtLeast(1200)
         val worldMs = (cfg.worldMapSec * 1000).toLong().coerceAtLeast(2000)
         val revisitMs = (locMs * 0.3).toLong().coerceAtLeast(1100)
@@ -436,7 +469,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 prevLat = p.lat
                 prevLon = p.lon
             }
-            photoSegs.last().add(Segment(ShowStep.Photo(p), photoMs))
+            val dur = if (p.isVideo) (p.durationMs ?: maxVideoMs).coerceIn(1500, maxVideoMs) else photoMs
+            photoSegs.last().add(Segment(ShowStep.Photo(p), dur))
             if (p.iso3 != null) prevIso = p.iso3
             if (p.lat != null && p.lon != null) anchors[anchors.size - 1] = p
         }
@@ -447,7 +481,79 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), revisitMs)
             }
         }
-        return segs
+        return if (cfg.dayTitles) withDayTitles(segs, filtered) else segs
+    }
+
+    private fun dayOf(p: PhotoItem): Long? = p.localTimeMs?.let { Math.floorDiv(it, DAY_MS) }
+
+    /**
+     * Inserts a "Dzień N" card whenever the calendar day changes. The card goes before the maps
+     * leading to the day's first photo, so the trip to a new place is introduced by its day.
+     */
+    private fun withDayTitles(segs: List<Segment>, photos: List<PhotoItem>): List<Segment> {
+        val days = photos.mapNotNull { dayOf(it) }.toSortedSet()
+        if (days.size < 2) return segs
+        // Numbering restarts after a long gap: separate trips in one folder each start at day 1.
+        val dayNumber = HashMap<Long, Int>()
+        var tripStart = days.first()
+        var prev = days.first()
+        for (d in days) {
+            if (d - prev > TRIP_GAP_DAYS) tripStart = d
+            dayNumber[d] = (d - tripStart + 1).toInt()
+            prev = d
+        }
+        val placeFor = HashMap<Long, PhotoItem>()
+        for (p in photos) {
+            val d = dayOf(p) ?: continue
+            if (p.lat != null && p.lon != null && d !in placeFor) placeFor[d] = p
+        }
+        val out = ArrayList<Segment>(segs.size + days.size)
+        var lastDay: Long? = null
+        for (seg in segs) {
+            val p = (seg.step as? ShowStep.Photo)?.photo
+            val d = p?.let { dayOf(it) }
+            if (d != null && d != lastDay) {
+                var at = out.size
+                while (at > 0 && out[at - 1].step.let {
+                        it is ShowStep.WorldCountry || it is ShowStep.LocationMap || it is ShowStep.RouteMap
+                    }
+                ) at--
+                out.add(at, Segment(ShowStep.DayTitle(dayNumber[d] ?: 1, d * DAY_MS, placeFor[d]), DAY_TITLE_MS))
+                lastDay = d
+            }
+            out += seg
+        }
+        return out
+    }
+
+    /** Looks up town names for every located photo in show order; results stream into [UiState.placeNames]. */
+    private fun startGeocoding() {
+        geocodeJob?.cancel()
+        if (!_state.value.config.placeNames) return
+        val wanted = LinkedHashMap<String, PhotoItem>()
+        for (seg in segments) {
+            val p = when (val st = seg.step) {
+                is ShowStep.Photo -> st.photo
+                is ShowStep.LocationMap -> st.photo
+                is ShowStep.RouteMap -> st.photo
+                is ShowStep.DayTitle -> st.photo
+                else -> null
+            } ?: continue
+            val lat = p.lat ?: continue
+            val lon = p.lon ?: continue
+            wanted.putIfAbsent(PlaceResolver.key(lat, lon), p)
+        }
+        if (wanted.isEmpty()) return
+        geocodeJob = viewModelScope.launch {
+            val cached = places.cachedMany(wanted.keys)
+            val known = cached.mapNotNull { (k, v) -> v?.let { k to it } }.toMap()
+            _state.update { it.copy(placeNames = it.placeNames + known) }
+            for ((k, p) in wanted) {
+                if (k in cached) continue
+                val name = places.resolve(p.lat!!, p.lon!!) ?: continue
+                _state.update { it.copy(placeNames = it.placeNames + (k to name)) }
+            }
+        }
     }
 
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
@@ -550,7 +656,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         musicJob = viewModelScope.launch {
             val name = WorldMapData.byIso(iso)?.name ?: ""
             val tracks = withContext(Dispatchers.IO) { musicResolver.tracksFor(iso, name, musicRoot) }
-            musicPlayer.play(tracks)
+            // Country change: the old song fades out under the new one instead of cutting off.
+            musicPlayer.play(tracks, crossfade = true)
         }
     }
 
@@ -619,6 +726,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 if (seg.musicIso3 != null) playMusicFor(seg.musicIso3, force = true)
+                // Clips have their own sound; the music steps back while one plays.
+                musicPlayer.setDucked((seg.step as? ShowStep.Photo)?.photo?.isVideo == true)
                 _state.value = _state.value.copy(message = null, step = seg.step)
                 pausableDelay(seg.durMs)
             }
@@ -647,6 +756,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         // skipNext() can finish the show from outside the driver; stop it from overwriting the step.
         driver?.cancel()
         _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished)
+        musicPlayer.setDucked(false)
         stopMusic()
     }
 
@@ -665,6 +775,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             newestFirst = prefs.getBoolean(PREF_DESC, false),
             onlyWithLocation = prefs.getBoolean(PREF_ONLY_LOC, false),
             transitionSec = prefs.getFloat(PREF_TRANSITION, 1f),
+            showVideos = prefs.getBoolean(PREF_VIDEOS, true),
+            maxVideoSec = prefs.getFloat(PREF_VIDEO_MAX, 20f),
+            dayTitles = prefs.getBoolean(PREF_DAY_TITLES, true),
+            placeNames = prefs.getBoolean(PREF_PLACES, true),
         )
     }
 
@@ -686,5 +800,13 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_DESC = "desc"
         private const val PREF_ONLY_LOC = "only_loc"
         private const val PREF_TRANSITION = "transition_sec"
+        private const val PREF_VIDEOS = "videos"
+        private const val PREF_VIDEO_MAX = "video_max_sec"
+        private const val PREF_DAY_TITLES = "day_titles"
+        private const val PREF_PLACES = "place_names"
+        private const val DAY_MS = 86_400_000L
+        private const val DAY_TITLE_MS = 3200L
+        /** A gap of more days than this without photos starts a new trip (day numbering restarts). */
+        private const val TRIP_GAP_DAYS = 3
     }
 }
