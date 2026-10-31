@@ -33,6 +33,33 @@ class MusicPlayer(private val context: Context) {
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
     private val tickRunnable = Runnable { tick() }
+    private var fadeOutMs = FADE_MS
+
+    /** Called on the main thread whenever a track starts playing (e.g. to analyse its beat). */
+    var onTrackStart: ((Uri) -> Unit)? = null
+
+    /** Track now playing, or null while nothing is audible yet. */
+    fun currentTrack(): Uri? = if (prepared && currentPlayer != null) playlist.getOrNull(idx) else null
+
+    /** Playback position of [currentTrack] in ms. */
+    fun positionMs(): Long? = if (prepared) runCatching { currentPlayer?.currentPosition?.toLong() }.getOrNull() else null
+
+    /** Slowly fades the music to silence over [ms] and stops it (end of the show). */
+    fun fadeOutAndStop(ms: Int) {
+        val old = currentPlayer
+        if (old == null || !prepared || paused) {
+            stop()
+            return
+        }
+        releaseFading()
+        fadingPlayer = old.also { detach(it) }
+        fadingGain = gain
+        currentPlayer = null
+        prepared = false
+        stopPlaylist()
+        fadeOutMs = ms.coerceAtLeast(TICK_MS.toInt())
+        ensureTicking()
+    }
 
     /** Starts [tracks]; with [crossfade] the previous music fades out while the new one fades in. */
     fun play(tracks: List<Uri>, crossfade: Boolean = true) {
@@ -44,6 +71,7 @@ class MusicPlayer(private val context: Context) {
             currentPlayer = null
             prepared = false
         }
+        fadeOutMs = FADE_MS
         stopPlaylist()
         if (tracks.isEmpty()) return
         playlist = tracks
@@ -81,7 +109,7 @@ class MusicPlayer(private val context: Context) {
             busy = true // still preparing; keep the clock alive for the fade-in
         }
         fadingPlayer?.let {
-            fadingGain -= TICK_MS.toFloat() / FADE_MS
+            fadingGain -= TICK_MS.toFloat() / fadeOutMs
             if (fadingGain <= 0f) releaseFading() else busy = true
         }
         applyVolumes()
@@ -116,6 +144,7 @@ class MusicPlayer(private val context: Context) {
                 applyVolumes()
                 if (!paused) mp.start()
                 ensureTicking()
+                playlist.getOrNull(idx)?.let { uri -> onTrackStart?.invoke(uri) }
             }
             p.setOnCompletionListener { mp ->
                 if (mp !== currentPlayer || playlist.isEmpty()) return@setOnCompletionListener

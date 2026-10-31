@@ -35,6 +35,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.travel.slideshow.model.KenBurnsMode
+import com.travel.slideshow.model.MapStyle
+import com.travel.slideshow.model.TransitionStyle
 import com.travel.slideshow.model.TravelMode
 import com.travel.slideshow.viewmodel.ShowViewModel
 
@@ -161,6 +164,27 @@ fun SettingsScreen(vm: ShowViewModel) {
                     }
                 }
 
+                ChipRow("Przejścia między zdjęciami", "przesunięcie w kierunku podróży i błysk na nowy dzień; mieszane — różne efekty",
+                    TransitionStyle.entries, cfg.transitionStyle, { it.label }) { v -> vm.updateConfig { it.copy(transitionStyle = v) } }
+                ChipRow("Ken Burns", "powolne przybliżanie zdjęcia w czasie pokazu",
+                    KenBurnsMode.entries, cfg.kenBurns, { it.label }) { v -> vm.updateConfig { it.copy(kenBurns = v) } }
+                if (cfg.kenBurns != KenBurnsMode.OFF) {
+                    ToggleRow("Ken Burns: celuj w twarze", "wykrywanie twarzy na telefonie, przybliżanie w ich stronę", cfg.faceFocus) { on ->
+                        vm.updateConfig { it.copy(faceFocus = on) }
+                    }
+                }
+                ChipRow("Styl mapy", "OpenStreetMap (jasna i ciemna to jej przekolorowanie), teren — OpenTopoMap, satelita — Esri",
+                    MapStyle.entries, cfg.mapStyle, { it.label }) { v -> vm.updateConfig { it.copy(mapStyle = v) } }
+                ToggleRow("Licznik kilometrów", "„+124 km · łącznie 1 380 km” podczas rysowania trasy", cfg.kmCounter) { on ->
+                    vm.updateConfig { it.copy(kmCounter = on) }
+                }
+                ToggleRow("Zmiana zdjęć w rytm muzyki", "zdjęcie zmienia się na uderzeniu (utwory z wyraźnym rytmem)", cfg.beatSync) { on ->
+                    vm.updateConfig { it.copy(beatSync = on) }
+                }
+                ToggleRow("Podsumowanie na końcu", "cała trasa na mapie, statystyki i flagi, muzyka powoli cichnie", cfg.finaleEnabled) { on ->
+                    vm.updateConfig { it.copy(finaleEnabled = on) }
+                }
+
                 SliderRow("Maks. długość filmu", cfg.maxVideoSec, 3f..60f, "s") {
                     vm.updateConfig { c -> c.copy(maxVideoSec = it) }
                 }
@@ -197,6 +221,20 @@ fun SettingsScreen(vm: ShowViewModel) {
                     "Sterowanie pokazu: tapnięcie — pasek sterowania, podwójne tapnięcie — pauza, przeciąganie mapy — przeglądanie kafelków.",
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+@Composable
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+private fun <T> ChipRow(title: String, hint: String, options: List<T>, selected: T, label: (T) -> String, onPick: (T) -> Unit) {
+    Column {
+        Text(title)
+        Text(hint, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (o in options) {
+                FilterChip(selected = o == selected, onClick = { onPick(o) }, label = { Text(label(o)) })
             }
         }
     }

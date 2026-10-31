@@ -15,10 +15,15 @@ import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.data.geo.CountryShape
 import com.travel.slideshow.data.geo.Geo
 import com.travel.slideshow.data.geo.WorldMapData
+import com.travel.slideshow.data.FaceFocus
+import com.travel.slideshow.media.BeatAnalyzer
 import com.travel.slideshow.media.MusicPlayer
 import com.travel.slideshow.media.MusicResolver
 import com.travel.slideshow.model.PhotoItem
+import com.travel.slideshow.model.KenBurnsMode
+import com.travel.slideshow.model.MapStyle
 import com.travel.slideshow.model.ShowConfig
+import com.travel.slideshow.model.TransitionStyle
 import com.travel.slideshow.model.TravelMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -73,6 +78,29 @@ data class RouteState(
 
 private fun Route.toState(uri: Uri) = RouteState(uri, points, flight, head, tail)
 
+/** Length of a [lon, lat] polyline in km. */
+fun polylineKm(pts: List<List<Double>>): Double {
+    var km = 0.0
+    for (i in 1 until pts.size) km += Geo.haversineKm(pts[i - 1][1], pts[i - 1][0], pts[i][1], pts[i][0])
+    return km
+}
+
+/** Whole leg, including the off-road bits at both ends. */
+fun RouteState.lengthKm(): Double = polylineKm(points) + polylineKm(head) + polylineKm(tail)
+
+/** Closing screen numbers; times are wall clock encoded as UTC. */
+data class FinaleStats(
+    val title: String,
+    val km: Double,
+    val days: Int,
+    val countries: List<String>,
+    val places: Int,
+    val photos: Int,
+    val videos: Int,
+    val fromMs: Long?,
+    val toMs: Long?,
+)
+
 data class PinState(val lat: Double, val lon: Double, val title: String? = null)
 
 /** Identity of a map pin; photos within ~1 m share one. */
@@ -107,6 +135,8 @@ data class UiState(
     val pinNumbers: Map<String, Int> = emptyMap(),
     /** The opening card is shown as the ready screen and waits for Start. */
     val awaitingStart: Boolean = false,
+    /** Set together with [ShowStep.Finished] when the closing summary is enabled. */
+    val finale: FinaleStats? = null,
     val runId: Int = 0,
 )
 
@@ -159,6 +189,13 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             photoFolderName = prefs.getString(PREF_PHOTO_ROOT, null)?.let { folderName(it.toUriOrNull()) },
             musicFolderName = folderName(musicRoot),
         )
+        musicPlayer.onTrackStart = { uri -> if (_state.value.config.beatSync) analyzeBeat(uri) }
+    }
+
+    private fun analyzeBeat(uri: Uri) {
+        if (BeatAnalyzer.gridFor(uri) != null) return
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) { BeatAnalyzer.analyze(app, uri) }
     }
 
     private fun String.toUriOrNull(): Uri? = runCatching { Uri.parse(this) }.getOrNull()
@@ -188,7 +225,15 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             .putString(PREF_TRAVEL_MODE, cfg.travelMode.name)
             .putBoolean(PREF_INTRO_ON, cfg.introEnabled)
             .putString(PREF_INTRO_TITLE, cfg.introTitle)
+            .putBoolean(PREF_FINALE, cfg.finaleEnabled)
+            .putBoolean(PREF_KM_COUNTER, cfg.kmCounter)
+            .putBoolean(PREF_BEAT_SYNC, cfg.beatSync)
+            .putString(PREF_TRANSITION_STYLE, cfg.transitionStyle.name)
+            .putString(PREF_KEN_BURNS, cfg.kenBurns.name)
+            .putBoolean(PREF_FACE_FOCUS, cfg.faceFocus)
+            .putString(PREF_MAP_STYLE, cfg.mapStyle.name)
             .apply()
+        if (cfg.beatSync && !old.beatSync) musicPlayer.currentTrack()?.let { analyzeBeat(it) }
         musicPlayer.setVolume(cfg.musicVolumePct / 100f * 0.85f)
         if (old.placeNames != cfg.placeNames) {
             if (cfg.placeNames) startGeocoding() else geocodeJob?.cancel()
@@ -250,8 +295,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun showReady() {
         val intro = segments.firstOrNull()?.step as? ShowStep.Intro
         _state.update {
-            if (intro != null) it.copy(step = intro, awaitingStart = true, dayBadge = null)
-            else it.copy(step = ShowStep.Idle, awaitingStart = false, dayBadge = null)
+            if (intro != null) it.copy(step = intro, awaitingStart = true, dayBadge = null, finale = null)
+            else it.copy(step = ShowStep.Idle, awaitingStart = false, dayBadge = null, finale = null)
         }
     }
 
@@ -459,7 +504,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         geocodeJob?.cancel()
         segIdx = 0
         setPaused(false)
-        _state.value = _state.value.copy(step = ShowStep.Idle, itemCount = 0)
+        _state.value = _state.value.copy(step = ShowStep.Idle, itemCount = 0, finale = null)
     }
 
     fun onMusicFolderPicked(uri: Uri?) {
@@ -844,7 +889,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         if (nextIdx >= segments.size) nextIdx = 0
         rebuildTrail(nextIdx)
         val startedRunId = _state.value.runId + 1
-        _state.value = _state.value.copy(runId = startedRunId)
+        _state.value = _state.value.copy(runId = startedRunId, finale = null)
         musicPlayer.setVolume(_state.value.config.musicVolumePct / 100f * 0.85f)
         driver = viewModelScope.launch {
             _state.value = _state.value.copy(stopped = false)
@@ -873,11 +918,56 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 // A clip with its own sound silences the music while it plays; a silent clip keeps it.
                 val clip = (seg.step as? ShowStep.Photo)?.photo?.takeIf { it.isVideo }
                 musicPlayer.setMuted(clip != null && clip.hasAudio != false)
+                prefetchFaces(i)
                 _state.value = _state.value.copy(message = null, step = seg.step, dayBadge = seg.day)
-                pausableDelay(seg.durMs)
+                val still = (seg.step as? ShowStep.Photo)?.photo?.takeIf { !it.isVideo }
+                if (still != null) beatAlignedDelay(seg.durMs) else pausableDelay(seg.durMs)
             }
             setFinished()
         }
+    }
+
+    /** Looks for faces in the next few photos, so Ken Burns can aim at them when they come up. */
+    private fun prefetchFaces(from: Int) {
+        val cfg = _state.value.config
+        if (cfg.kenBurns == KenBurnsMode.OFF || !cfg.faceFocus) return
+        var found = 0
+        var i = from
+        while (i < segments.size && found < FACE_LOOKAHEAD) {
+            val p = (segments[i].step as? ShowStep.Photo)?.photo
+            if (p != null && !p.isVideo) {
+                FaceFocus.prefetch(getApplication(), p.uri)
+                found++
+            }
+            i++
+        }
+    }
+
+    /**
+     * Shows a photo for about [ms], ending on the beat of the music nearest to that time (within half a
+     * beat either way), when beat sync is on and the current track has a detected tempo.
+     */
+    private suspend fun beatAlignedDelay(ms: Long) {
+        val cfg = _state.value.config
+        if (!cfg.beatSync || !cfg.musicEnabled) return pausableDelay(ms)
+        val grid = musicPlayer.currentTrack()?.let { BeatAnalyzer.gridFor(it) } ?: return pausableDelay(ms)
+        val half = (beatStep(grid.periodMs) / 2).toLong()
+        pausableDelay((ms - half).coerceAtLeast(0))
+        // Re-read after the wait: pauses and track changes move the music under the show.
+        val g = musicPlayer.currentTrack()?.let { BeatAnalyzer.gridFor(it) }
+        val pos = musicPlayer.positionMs()
+        if (g == null || pos == null) return pausableDelay(half)
+        val p = beatStep(g.periodMs)
+        val k = Math.ceil((pos - g.offsetMs) / p)
+        val wait = (g.offsetMs + k * p - pos).toLong().coerceIn(0L, p.toLong())
+        pausableDelay(wait)
+    }
+
+    /** Fast tempos snap to every other beat, so changes never come too close together. */
+    private fun beatStep(periodMs: Double): Double {
+        var p = periodMs
+        while (p < MIN_BEAT_STEP_MS) p *= 2
+        return p
     }
 
     private suspend fun pausableDelay(ms: Long) {
@@ -900,9 +990,47 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun setFinished() {
         // skipNext() can finish the show from outside the driver; stop it from overwriting the step.
         driver?.cancel()
-        _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished)
+        val cfg = _state.value.config
+        val finale = if (cfg.finaleEnabled && segments.isNotEmpty()) {
+            // The whole trail goes on the closing map.
+            rebuildTrail(segments.size)
+            finaleStats()
+        } else null
+        _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished, finale = finale, dayBadge = null)
         musicPlayer.setMuted(false)
-        stopMusic()
+        if (finale != null) {
+            // The music fades away slowly under the summary instead of stopping.
+            musicJob?.cancel()
+            musicJob = null
+            currentMusicIso = null
+            musicPlayer.fadeOutAndStop(FINALE_FADE_MS)
+        } else stopMusic()
+    }
+
+    private fun finaleStats(): FinaleStats {
+        val photos = segments.mapNotNull { (it.step as? ShowStep.Photo)?.photo }
+        var km = 0.0
+        val seen = HashSet<Uri>()
+        for (seg in segments) {
+            val st = seg.step as? ShowStep.RouteMap ?: continue
+            if (!seen.add(st.photo.uri)) continue
+            val cached = routeKey(st)?.let { routeCache[it] }
+            km += if (cached != null) cached.toState(st.photo.uri).lengthKm()
+            else Geo.haversineKm(st.from.lat!!, st.from.lon!!, st.photo.lat!!, st.photo.lon!!)
+        }
+        val times = photos.mapNotNull { it.localTimeMs }
+        val cfg = _state.value.config
+        return FinaleStats(
+            title = cfg.introTitle.ifBlank { _state.value.photoFolderName ?: "Moja podróż" },
+            km = km,
+            days = photos.mapNotNull { dayOf(it) }.distinct().size,
+            countries = photos.mapNotNull { it.iso3 }.distinct(),
+            places = _state.value.pinNumbers.size,
+            photos = photos.count { !it.isVideo },
+            videos = photos.count { it.isVideo },
+            fromMs = times.minOrNull(),
+            toMs = times.maxOrNull(),
+        )
     }
 
     private fun loadConfig(): ShowConfig {
@@ -928,8 +1056,18 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 .getOrDefault(TravelMode.CAR),
             introEnabled = prefs.getBoolean(PREF_INTRO_ON, true),
             introTitle = prefs.getString(PREF_INTRO_TITLE, "") ?: "",
+            finaleEnabled = prefs.getBoolean(PREF_FINALE, true),
+            kmCounter = prefs.getBoolean(PREF_KM_COUNTER, true),
+            beatSync = prefs.getBoolean(PREF_BEAT_SYNC, false),
+            transitionStyle = enumPref(PREF_TRANSITION_STYLE, TransitionStyle.FADE),
+            kenBurns = enumPref(PREF_KEN_BURNS, KenBurnsMode.NARROW),
+            faceFocus = prefs.getBoolean(PREF_FACE_FOCUS, true),
+            mapStyle = enumPref(PREF_MAP_STYLE, MapStyle.STANDARD),
         )
     }
+
+    private inline fun <reified E : Enum<E>> enumPref(key: String, default: E): E =
+        runCatching { enumValueOf<E>(prefs.getString(key, null)!!) }.getOrDefault(default)
 
     override fun onCleared() {
         driver?.cancel()
@@ -957,6 +1095,18 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_TRAVEL_MODE = "travel_mode"
         private const val PREF_INTRO_ON = "intro_on"
         private const val PREF_INTRO_TITLE = "intro_title"
+        private const val PREF_FINALE = "finale_on"
+        private const val PREF_KM_COUNTER = "km_counter"
+        private const val PREF_BEAT_SYNC = "beat_sync"
+        private const val PREF_TRANSITION_STYLE = "transition_style"
+        private const val PREF_KEN_BURNS = "ken_burns"
+        private const val PREF_FACE_FOCUS = "face_focus"
+        private const val PREF_MAP_STYLE = "map_style"
+        /** Music fade-out under the closing summary. */
+        private const val FINALE_FADE_MS = 9000
+        /** Shortest gap between beats a photo change may snap to (faster tempos use every other beat). */
+        private const val MIN_BEAT_STEP_MS = 400.0
+        private const val FACE_LOOKAHEAD = 4
         /** After Start the card lingers while the music begins; before Start it waits indefinitely. */
         private const val INTRO_MS = 3000L
         private const val INTRO_PHOTOS = 6

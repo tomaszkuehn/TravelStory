@@ -20,11 +20,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
+import com.travel.slideshow.model.MapStyle
 import com.travel.slideshow.model.TravelMode
 import com.travel.slideshow.viewmodel.PinState
 import com.travel.slideshow.viewmodel.RouteState
 import com.travel.slideshow.viewmodel.ShowStep
+import com.travel.slideshow.viewmodel.lengthKm
 import com.travel.slideshow.viewmodel.pinKey
+import org.osmdroid.tileprovider.tilesource.ITileSource
+import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+import org.osmdroid.util.MapTileIndex
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
@@ -51,6 +58,8 @@ fun ShowMap(
     onGesture: () -> Unit,
     manual: () -> Boolean,
     onArrived: (ShowStep) -> Unit,
+    mapStyle: MapStyle,
+    onRouteProgress: (RouteProgress?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // The effect restarts when the OSRM route arrives, but elapsed time is measured from the
@@ -59,23 +68,25 @@ fun ShowMap(
         is ShowStep.RouteMap -> listOf(step, route?.points?.size ?: -1, route?.flight)
         else -> step
     }
-    SingleMapView(key, step, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
+    SingleMapView(key, step, mapStyle, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
         pinNumberMaps[mv] = pinNumbers
+        if (step !is ShowStep.RouteMap) onRouteProgress(null)
         when (step) {
             is ShowStep.WorldCountry -> drawWorldCountry(mv, step, visitedPins, manual)
             is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, totalSec, elapsedMs, manual, { onArrived(step) })
             is ShowStep.RouteMap ->
                 drawRoute(
                     mv, step, route, pastRoutes, visitedPins, travelMode, totalSec, elapsedMs, manual,
-                    { onArrived(step) }
+                    { onArrived(step) }, onRouteProgress,
                 )
+            is ShowStep.Finished -> drawFinale(mv, pastRoutes, visitedPins)
             else -> {}
         }
     }
 }
 
 @Composable
-private fun SingleMapView(key: Any, startKey: Any, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView, Long) -> Unit) {
+private fun SingleMapView(key: Any, startKey: Any, mapStyle: MapStyle, onMapTap: () -> Unit, onGesture: () -> Unit, manual: () -> Boolean, modifier: Modifier, effect: suspend (MapView, Long) -> Unit) {
     val context = LocalContext.current
     val tapHandler by rememberUpdatedState(onMapTap)
     val gestureHandler by rememberUpdatedState(onGesture)
@@ -94,7 +105,8 @@ private fun SingleMapView(key: Any, startKey: Any, onMapTap: () -> Unit, onGestu
         modifier = modifier,
         factory = { ctx ->
             GesturingMapView(ctx).apply {
-                setTileSource(TileSourceFactory.MAPNIK)
+                setTileSource(tileSourceFor(mapStyle))
+                applyStyleFilter(this, mapStyle)
                 setMultiTouchControls(true)
                 isTilesScaledToDpi = true
                 minZoomLevel = 1.6
@@ -106,7 +118,12 @@ private fun SingleMapView(key: Any, startKey: Any, onMapTap: () -> Unit, onGestu
                 tag = tapOverlay
                 overlays.add(tapOverlay)
             }.also { ref.value = it }
-        }
+        },
+        update = { mv ->
+            val src = tileSourceFor(mapStyle)
+            if (mv.tileProvider.tileSource.name() != src.name()) mv.setTileSource(src)
+            applyStyleFilter(mv, mapStyle)
+        },
     )
     val mv = ref.value
     val startedAt = remember(startKey) { System.currentTimeMillis() }
@@ -114,6 +131,110 @@ private fun SingleMapView(key: Any, startKey: Any, onMapTap: () -> Unit, onGestu
     LaunchedEffect(key, mv) {
         mv?.let { effect(it, System.currentTimeMillis() - startedAt) }
     }
+}
+
+/** Distance shown in the corner while a leg is drawn. */
+data class RouteProgress(val uri: Any, val legKm: Double, val doneKm: Double, val flight: Boolean)
+
+/** Esri World Imagery (no key); its tile URLs are z/y/x rather than the usual z/x/y. */
+private object EsriImagery : OnlineTileSourceBase(
+    "EsriWorldImagery", 0, 19, 256, ".jpg",
+    arrayOf("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/"),
+    "Esri, Maxar, Earthstar Geographics",
+) {
+    override fun getTileURLString(pMapTileIndex: Long): String =
+        baseUrl + MapTileIndex.getZoom(pMapTileIndex) + "/" + MapTileIndex.getY(pMapTileIndex) + "/" +
+            MapTileIndex.getX(pMapTileIndex)
+}
+
+/** The light and dark styles are the standard OSM tiles recoloured on the phone. */
+private fun tileSourceFor(style: MapStyle): ITileSource = when (style) {
+    MapStyle.STANDARD, MapStyle.LIGHT, MapStyle.DARK -> TileSourceFactory.MAPNIK
+    MapStyle.TOPO -> TileSourceFactory.OpenTopo
+    MapStyle.SATELLITE -> EsriImagery
+}
+
+private val LUM = floatArrayOf(0.2126f, 0.7152f, 0.0722f)
+
+/** Mostly grey, washed-out map that keeps a hint of the original colours. */
+private val LIGHT_FILTER: ColorMatrixColorFilter by lazy {
+    val keep = 0.3f
+    val gain = 0.72f
+    val lift = 255f * 0.28f
+    val m = FloatArray(20)
+    for (r in 0..2) {
+        for (c in 0..2) m[r * 5 + c] = gain * (LUM[c] * (1 - keep) + if (r == c) keep else 0f)
+        m[r * 5 + 4] = lift
+    }
+    m[18] = 1f
+    ColorMatrixColorFilter(ColorMatrix(m))
+}
+
+/** Inverted grey with a slight blue cast: dark land, lighter roads and borders. */
+private val DARK_FILTER: ColorMatrixColorFilter by lazy {
+    val gain = -0.82f
+    val base = floatArrayOf(222f, 228f, 242f)
+    val m = FloatArray(20)
+    for (r in 0..2) {
+        for (c in 0..2) m[r * 5 + c] = gain * LUM[c]
+        m[r * 5 + 4] = base[r]
+    }
+    m[18] = 1f
+    ColorMatrixColorFilter(ColorMatrix(m))
+}
+
+private val appliedStyle = java.util.WeakHashMap<MapView, MapStyle>()
+
+private fun applyStyleFilter(mv: MapView, style: MapStyle) {
+    if (appliedStyle[mv] == style) return
+    appliedStyle[mv] = style
+    mv.overlayManager.tilesOverlay.setColorFilter(
+        when (style) {
+            MapStyle.LIGHT -> LIGHT_FILTER
+            MapStyle.DARK -> DARK_FILTER
+            else -> null
+        }
+    )
+    mv.invalidate()
+}
+
+/**
+ * Closing map: every leg and numbered pin of the trip, zooming from wherever the map was to the
+ * whole trail, which sits in the upper part of the screen above the statistics.
+ */
+private suspend fun drawFinale(mapView: MapView, pastRoutes: List<RouteState>, visitedPins: List<PinState>) {
+    clearOverlays(mapView)
+    addPastRouteLines(mapView, pastRoutes, null)
+    addVisitedPins(mapView, visitedPins)
+    mapView.invalidate()
+    val pts = visitedPins.map { it.lat to it.lon } +
+        pastRoutes.flatMap { r -> r.points.map { it[1] to it[0] } }
+    if (pts.isEmpty()) return
+    var n = pts.maxOf { it.first }; var s = pts.minOf { it.first }
+    var e = pts.maxOf { it.second }; var w = pts.minOf { it.second }
+    // A single place still gets a town-sized view rather than maximum zoom.
+    if (n - s < 0.02) { n += 0.01; s -= 0.01 }
+    if (e - w < 0.02) { e += 0.01; w -= 0.01 }
+    val bb = BoundingBox(n, e, s, w)
+    // Wait for the view to be laid out; zoomToBoundingBox needs its size.
+    while (mapView.width == 0 || mapView.height == 0) kotlinx.coroutines.delay(16)
+    val startZoom = mapView.zoomLevelDouble
+    val startCenter = GeoPoint(mapView.mapCenter.latitude, mapView.mapCenter.longitude)
+    mapView.visibility = android.view.View.INVISIBLE
+    val h = mapView.height
+    mapView.zoomToBoundingBox(bb, false, (minOf(mapView.width, h) * 0.12).toInt())
+    // Shrink a bit more and push the trail up so the bottom panel does not cover it.
+    mapView.controller.setZoom((mapView.zoomLevelDouble - 0.7).coerceIn(2.0, 15.0))
+    mapView.controller.setCenter(bb.centerWithDateLine)
+    val shifted = mapView.projection.fromPixels(mapView.width / 2, (h / 2 + h * 0.2).toInt())
+    val fitZoom = mapView.zoomLevelDouble
+    mapView.controller.setZoom(startZoom)
+    mapView.controller.setCenter(startCenter)
+    mapView.visibility = android.view.View.VISIBLE
+    mapView.invalidate()
+    kotlinx.coroutines.delay(300)
+    animateZoomDecel(mapView, GeoPoint(shifted.latitude, shifted.longitude), fitZoom, 3200L)
+    mapView.invalidate()
 }
 
 private class GesturingMapView(context: Context) : MapView(context) {
@@ -469,6 +590,7 @@ private suspend fun drawRoute(
     elapsedMs: Long,
     manual: () -> Boolean,
     onArrived: () -> Unit,
+    onProgress: (RouteProgress?) -> Unit,
 ) {
     val from = step.from
     val to = step.photo
@@ -514,7 +636,12 @@ private suspend fun drawRoute(
         mapView.invalidate()
     }
     waitManualHeld(manual)
-    if (route == null) return
+    if (route == null) {
+        onProgress(null)
+        return
+    }
+    val legKm = route.lengthKm()
+    onProgress(RouteProgress(to.uri, legKm, 0.0, route.flight))
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
     val elapsed = elapsedMs.coerceAtLeast(0)
@@ -569,6 +696,7 @@ private suspend fun drawRoute(
                 )
             }
             line.setPoints(partial)
+            onProgress(RouteProgress(to.uri, legKm, legKm * frac, route.flight))
             if (!manual()) {
                 val tip = partial.last()
                 val cLat = mapView.mapCenter.latitude
@@ -581,6 +709,7 @@ private suspend fun drawRoute(
             kotlinx.coroutines.delay(if (drawMs <= 0) 0L else drawMs / steps)
         }
         line.setPoints(full)
+        onProgress(RouteProgress(to.uri, legKm, legKm, route.flight))
         plane.tip = null
         addOffRoad(mapView, route.tail)
         addPin(mapView, bLat, bLon, (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: ""))

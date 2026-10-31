@@ -23,6 +23,12 @@ Aplikacja Android do prezentowania zdjęć i krótkich filmów z podróży na ta
 - **Ekran startowy**: po wczytaniu zdjęć wyświetla się i czeka na przycisk ▶ Start (po starcie zostaje jeszcze ok. 3 s, gdy rusza muzyka); zawiera konfigurowalny tytuł (domyślnie nazwa folderu ze zdjęciami), zakres dat wyjazdu i flagi odwiedzonych państw na tle półprzezroczystego, powoli przybliżanego kolażu do 6 zdjęć wybranych równomiernie z całego pokazu; po starcie gra już muzyka pierwszego państwa. Wyłączany w ustawieniach.
 - **Informacja o dniu**: przy zmianie dnia kalendarzowego (czas lokalny z EXIF) pod flagą w lewym górnym rogu pojawia się mała etykieta „Dzień 3  14.07.2025” — na pierwszej mapie prowadzącej do pierwszego zdjęcia tego dnia (bez osobnej planszy) lub na samym zdjęciu; numeracja zaczyna się od nowa po przerwie dłuższej niż 3 dni (osobne wyjazdy w jednym folderze).
 - **Plakietka w lewym górnym rogu**: flaga państwa i nazwa miejscowości (gdy znana) na mapie lokalizacji, trasie i zdjęciu.
+- **Podsumowanie na końcu** (opcja): mapa przelatuje do całej trasy z pinezkami, a na dole pojawia się tytuł, daty, statystyki liczone od zera (km, dni, kraje, miejsca, zdjęcia, filmy) i flagi odwiedzonych krajów; muzyka cichnie przez ~9 s.
+- **Licznik kilometrów** (opcja): podczas rysowania trasy w lewym dolnym rogu „+124 km · łącznie 1 380 km” (ikona samochodu/roweru/pieszego, ✈ dla lotu).
+- **Zmiana zdjęć w rytm muzyki** (opcja, domyślnie wyłączona): tempo i faza utworu wykrywane na telefonie (pierwsze 45 s, wynik zapamiętywany); zdjęcie zmienia się na najbliższym uderzeniu (najwyżej pół taktu od zadanego czasu). Utwory bez wyraźnego rytmu i generowane tło ambient nie są synchronizowane.
+- **Przejścia między zdjęciami** (opcja): przenikanie, przesunięcie w kierunku podróży (wg położenia GPS kolejnych zdjęć) z białym błyskiem przy zmianie dnia, albo mieszane (przenikanie/przesunięcie/zoom).
+- **Ken Burns** (opcja): wyłączony / tylko wąskie zdjęcia / wszystkie; opcjonalnie przybliżanie w stronę twarzy (wbudowany `android.media.FaceDetector`, wykrywanie kilka zdjęć naprzód).
+- **Styl mapy** (opcja): standardowa (OSM Mapnik), teren (OpenTopoMap), jasna i ciemna (kafelki OSM przekolorowane filtrem na telefonie), satelita (Esri World Imagery) — wszystkie bez klucza API.
 - **Opcje**: przerwa między zdjęciami, czas mapy lokalizacji, czas fazy „mapa świata”, sposób podróży (samochód/rower/pieszo), próg dystansu (km), głośność, kolejność (od najstarszych/najnowszych), pomijanie zdjęć bez GPS, czas przejścia mapa↔zdjęcie, filmy on/off i ich maks. długość, ekran startowy i jego tytuł, informacja o dniu, nazwy miejsc.
 
 ## Wymagania
@@ -58,7 +64,8 @@ Podgląd map podczas pokazu jest animowany; mapę można ręcznie przeglądać, 
 - Zdjęcia: Storage Access Framework (DocumentsContract) + `androidx.exifinterface`; koordynaty GPS z EXIF (wartości rational DMS) lub XMP (`exif:GPSLatitude/Longitude`).
 - Odtwarzacz muzyki: `MediaPlayer` z play-listą, crossfade przy zmianie państwa i wyciszaniem na czas filmów ze ścieżką audio (`METADATA_KEY_HAS_AUDIO`); fallback: generator ambientu (sine pad + pentatonika, 22.05 kHz mono WAV).
 - Filmy: `androidx.media3` (ExoPlayer + PlayerView), metadane przez `MediaMetadataRetriever`.
-- Zdjęcia w UI: Coil; efekt Ken Burns i zoom gestami przez `graphicsLayer`.
+- Zdjęcia w UI: Coil; efekt Ken Burns (z punktem skupienia na twarzach z `FaceFocus`) i zoom gestami przez `graphicsLayer`.
+- Rytm muzyki: `BeatAnalyzer` — dekodowanie `MediaExtractor`/`MediaCodec`, obwiednia narastania głośności, autokorelacja (70–180 BPM, preferencja ~120) i dopasowanie grzebienia; wynik w preferencjach `beat_grids`.
 - Nazwy miejsc: `PlaceResolver` — Nominatim reverse (`zoom=10`, `accept-language=pl`), limit 1 zapytanie/s, własny User-Agent, cache `files/places.json` (także wyniki „brak nazwy”).
 - Trasy: `RouteResolver` — OSRM (samochód: router.project-osrm.org, rower/pieszo: routing.openstreetmap.de `routed-bike`/`routed-foot`; `overview=full`), limit 1 zapytanie/s, uproszczenie Douglasa-Peuckera (tolerancja ~0,04% przekątnej odcinka), cache `files/routes/` (plik na odcinek i sposób podróży, także decyzja „brak drogi”); dojścia > 30 m od drogi do pinezek rysowane przerywaną linią; animacja linii proporcjonalna do odległości (stała prędkość czubka); łuk lotu = ortodroma z lekkim wygięciem ku biegunowi; błędy sieci/429 nie są zapamiętywane.
 - Informacja o dniu: dzień liczony z czasu lokalnego zdjęcia; nowa numeracja po przerwie > 3 dni.

@@ -40,7 +40,34 @@ data class ShowConfig(
     val introEnabled: Boolean = true,
     /** Opening card title; blank means the photo folder's name. */
     val introTitle: String = "",
+    /** Closing screen: the whole trail on the map with counted-up trip statistics. */
+    val finaleEnabled: Boolean = true,
+    /** Distance counter in the corner while a route is drawn. */
+    val kmCounter: Boolean = true,
+    /** Photo changes wait for the nearest beat of the music (tracks with a detectable tempo). */
+    val beatSync: Boolean = false,
+    val transitionStyle: TransitionStyle = TransitionStyle.FADE,
+    val kenBurns: KenBurnsMode = KenBurnsMode.NARROW,
+    /** Ken Burns zooms towards detected faces. */
+    val faceFocus: Boolean = true,
+    val mapStyle: MapStyle = MapStyle.STANDARD,
 )
 
 /** How legs between photos are routed on roads (long hops are flights either way). */
 enum class TravelMode(val label: String) { CAR("Samochód"), BIKE("Rower"), FOOT("Pieszo") }
+
+/** How one photo gives way to the next. */
+enum class TransitionStyle(val label: String) {
+    FADE("Przenikanie"),
+    /** Slides in the direction of travel when the place changes, flashes on a new day. */
+    SLIDE("Przesunięcie"),
+    /** Picks a different effect each time: fade, slide, zoom, flash on a new day. */
+    MIXED("Mieszane"),
+}
+
+/** Slow pan and zoom over still photos. */
+enum class KenBurnsMode(val label: String) { OFF("Wyłączony"), NARROW("Wąskie zdjęcia"), ALL("Wszystkie") }
+
+enum class MapStyle(val label: String) {
+    STANDARD("Standardowa"), TOPO("Teren"), LIGHT("Jasna"), DARK("Ciemna"), SATELLITE("Satelita")
+}
