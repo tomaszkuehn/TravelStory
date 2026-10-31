@@ -116,7 +116,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
 import kotlinx.coroutines.delay
+import com.travel.slideshow.media.ExportState
+import com.travel.slideshow.media.VideoExport
 import kotlinx.coroutines.launch
 
 @Composable
@@ -124,6 +128,11 @@ fun SlideshowScreen(vm: ShowViewModel) {
     val st by vm.state.collectAsState()
     val awaiting = st.awaitingStart && st.step is ShowStep.Intro
     val idleLike = st.step is ShowStep.Idle || st.step is ShowStep.Finished || awaiting
+    val exportState by VideoExport.state.collectAsState()
+    val recording = exportState is ExportState.Recording
+    val startExport = rememberVideoExport(vm.showTitle())
+    val exportIdle = exportState is ExportState.Idle
+    val onRecord = startExport?.takeIf { exportIdle }
 
     Box(
         Modifier
@@ -243,8 +252,8 @@ fun SlideshowScreen(vm: ShowViewModel) {
             when (val s = st.step) {
                 is ShowStep.Idle -> IdleView(st, vm)
                 is ShowStep.Scanning -> ScanningView(st, s, vm)
-                is ShowStep.Finished -> st.finale?.let { FinaleView(it, vm) } ?: FinishedView(vm)
-                is ShowStep.Intro -> if (awaiting) StartBar(st, vm)
+                is ShowStep.Finished -> st.finale?.let { FinaleView(it, vm, recording, onRecord) } ?: FinishedView(vm, onRecord)
+                is ShowStep.Intro -> if (awaiting) StartBar(st, vm, onRecord)
                 else -> {}
             }
         }
@@ -266,7 +275,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
             )
         }
 
-        if (!idleLike) {
+        if (!idleLike && !recording) {
             IconButton(
                 onClick = { vm.setSettingsVisible(true) },
                 modifier = Modifier
@@ -292,7 +301,17 @@ fun SlideshowScreen(vm: ShowViewModel) {
                 .navigationBarsPadding()
                 .padding(bottom = 12.dp)
         )
+        VideoExportStatus()
     }
+}
+
+/** "Nagraj wideo" button: plays the whole show from the start and saves it as an MP4. */
+@Composable
+private fun RecordButton(onRecord: () -> Unit) {
+    OutlinedButton(
+        onClick = onRecord,
+        colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.Black.copy(alpha = 0.45f), contentColor = Color.White),
+    ) { Text("⏺ Nagraj wideo") }
 }
 
 @Composable
@@ -439,7 +458,7 @@ private fun IntroView(card: ShowStep.Intro, title: String) {
 
 /** Start button under the opening card while it waits for the show to be started. */
 @Composable
-private fun StartBar(st: UiState, vm: ShowViewModel) {
+private fun StartBar(st: UiState, vm: ShowViewModel, onRecord: (() -> Unit)?) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Bottom,
@@ -453,6 +472,7 @@ private fun StartBar(st: UiState, vm: ShowViewModel) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Button(onClick = { vm.start() }) { Text("▶ Start", fontSize = 18.sp) }
+            onRecord?.let { RecordButton(it) }
             IconButton(
                 onClick = { vm.setSettingsVisible(true) },
                 modifier = Modifier.background(Color.Black.copy(alpha = 0.35f), CircleShape)
@@ -870,7 +890,7 @@ private fun plural(n: Int, one: String, few: String, many: String): String = whe
  */
 @kotlin.OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FinaleView(f: FinaleStats, vm: ShowViewModel) {
+private fun FinaleView(f: FinaleStats, vm: ShowViewModel, recording: Boolean, onRecord: (() -> Unit)?) {
     val progress = remember(f) { Animatable(0f) }
     val shown = remember(f) { Animatable(0f) }
     LaunchedEffect(f) {
@@ -931,9 +951,14 @@ private fun FinaleView(f: FinaleStats, vm: ShowViewModel) {
                 )
             }
             SpacerHeight(14.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = { vm.restartAll() }) { Text("Jeszcze raz") }
-                Button(onClick = { vm.setSettingsVisible(true) }) { Text("Ustawienia") }
+            // Kept out of an exported film; the space stays so nothing shifts when they appear.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.graphicsLayer { alpha = if (recording) 0f else 1f }
+            ) {
+                Button(onClick = { vm.restartAll() }, enabled = !recording) { Text("Jeszcze raz") }
+                Button(onClick = { vm.setSettingsVisible(true) }, enabled = !recording) { Text("Ustawienia") }
+                if (!recording) onRecord?.let { RecordButton(it) }
             }
         }
     }
@@ -950,7 +975,7 @@ private fun StatTile(value: String, label: String) {
 private const val FINALE_COUNT_MS = 3200
 
 @Composable
-private fun FinishedView(vm: ShowViewModel) {
+private fun FinishedView(vm: ShowViewModel, onRecord: (() -> Unit)?) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -961,6 +986,7 @@ private fun FinishedView(vm: ShowViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = { vm.restartAll() }) { Text("Jeszcze raz") }
             Button(onClick = { vm.setSettingsVisible(true) }) { Text("Ustawienia") }
+            onRecord?.let { RecordButton(it) }
         }
     }
 }

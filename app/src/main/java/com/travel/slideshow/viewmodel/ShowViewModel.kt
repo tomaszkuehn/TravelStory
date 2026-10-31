@@ -19,6 +19,10 @@ import com.travel.slideshow.data.FaceFocus
 import com.travel.slideshow.media.BeatAnalyzer
 import com.travel.slideshow.media.MusicPlayer
 import com.travel.slideshow.media.MusicResolver
+import com.travel.slideshow.media.ExportState
+import com.travel.slideshow.media.VideoExport
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.travel.slideshow.model.PhotoItem
 import com.travel.slideshow.model.KenBurnsMode
 import com.travel.slideshow.model.MapStyle
@@ -190,6 +194,12 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             musicFolderName = folderName(musicRoot),
         )
         musicPlayer.onTrackStart = { uri -> if (_state.value.config.beatSync) analyzeBeat(uri) }
+        // A film export plays the show from the beginning once recording is under way.
+        viewModelScope.launch {
+            VideoExport.state.map { it is ExportState.Recording }.distinctUntilChanged().collect { rec ->
+                if (rec && segments.isNotEmpty()) restartAll()
+            }
+        }
     }
 
     private fun analyzeBeat(uri: Uri) {
@@ -353,6 +363,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private fun setPaused(paused: Boolean) {
         pausedGate.value = paused
         _state.value = _state.value.copy(paused = paused)
+        // Paused stretches (controls, settings, app in the background) are cut out of the film.
+        VideoExport.setPaused(paused)
         if (paused) musicPlayer.pause() else musicPlayer.resume()
     }
 
@@ -996,6 +1008,18 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             rebuildTrail(segments.size)
             finaleStats()
         } else null
+        if (VideoExport.isRecording) {
+            if (finale == null) {
+                // The film ends on the last photo, before the buttons of the end screen appear.
+                VideoExport.stop()
+            } else {
+                val run = _state.value.runId
+                viewModelScope.launch {
+                    delay(FINALE_RECORD_MS)
+                    if (_state.value.runId == run && _state.value.step is ShowStep.Finished) VideoExport.stop()
+                }
+            }
+        }
         _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished, finale = finale, dayBadge = null)
         musicPlayer.setMuted(false)
         if (finale != null) {
@@ -1006,6 +1030,9 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             musicPlayer.fadeOutAndStop(FINALE_FADE_MS)
         } else stopMusic()
     }
+
+    /** Title of the show: the one typed in settings, else the photo folder's name. */
+    fun showTitle(): String = _state.value.config.introTitle.ifBlank { _state.value.photoFolderName ?: "Moja podróż" }
 
     private fun finaleStats(): FinaleStats {
         val photos = segments.mapNotNull { (it.step as? ShowStep.Photo)?.photo }
@@ -1021,7 +1048,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val times = photos.mapNotNull { it.localTimeMs }
         val cfg = _state.value.config
         return FinaleStats(
-            title = cfg.introTitle.ifBlank { _state.value.photoFolderName ?: "Moja podróż" },
+            title = showTitle(),
             km = km,
             days = photos.mapNotNull { dayOf(it) }.distinct().size,
             countries = photos.mapNotNull { it.iso3 }.distinct(),
@@ -1104,6 +1131,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_MAP_STYLE = "map_style"
         /** Music fade-out under the closing summary. */
         private const val FINALE_FADE_MS = 9000
+        /** How much of the closing summary goes into an exported film. */
+        private const val FINALE_RECORD_MS = 10_500L
         /** Shortest gap between beats a photo change may snap to (faster tempos use every other beat). */
         private const val MIN_BEAT_STEP_MS = 400.0
         private const val FACE_LOOKAHEAD = 4
