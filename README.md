@@ -61,7 +61,7 @@ Podgląd map podczas pokazu jest animowany; mapę można ręcznie przeglądać, 
 ## Szczegóły techniczne
 
 - Jetpack Compose (Material 3), ViewModel + StateFlow, korutyny (maszyna stanów pokazu na segmentach).
-- Mapy: [osmdroid](https://github.com/osmdroid/osmdroid) (kafelki Mapnik OSM), granice państw: `assets/world/countries.geo.json` (world.geo.json, ISO-3) + point-in-polygon (ray casting; rozstrzyganie enklaw przez najmniejszy bounding box).
+- Mapy: [osmdroid](https://github.com/osmdroid/osmdroid) (kafelki Mapnik OSM; animacje mapy liczone od czasu na klatkach ekranu, pamięć 160 kafelków, wcześniejsze żądanie kafelków docelowego widoku i wzdłuż trasy, tło ładowania w kolorze stylu), granice państw: `assets/world/countries.geo.json` (world.geo.json, ISO-3) + point-in-polygon (ray casting; rozstrzyganie enklaw przez najmniejszy bounding box).
 - Zdjęcia: Storage Access Framework (DocumentsContract) + `androidx.exifinterface`; koordynaty GPS z EXIF (wartości rational DMS) lub XMP (`exif:GPSLatitude/Longitude`).
 - Odtwarzacz muzyki: `MediaPlayer` z play-listą, crossfade przy zmianie państwa i wyciszaniem na czas filmów ze ścieżką audio (`METADATA_KEY_HAS_AUDIO`); fallback: generator ambientu (sine pad + pentatonika, 22.05 kHz mono WAV).
 - Filmy: `androidx.media3` (ExoPlayer + PlayerView), metadane przez `MediaMetadataRetriever`.

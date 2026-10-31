@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
+import androidx.compose.runtime.withFrameNanos
 import com.travel.slideshow.model.MapStyle
 import com.travel.slideshow.model.TravelMode
 import com.travel.slideshow.viewmodel.PinState
@@ -188,6 +189,14 @@ private val appliedStyle = java.util.WeakHashMap<MapView, MapStyle>()
 private fun applyStyleFilter(mv: MapView, style: MapStyle) {
     if (appliedStyle[mv] == style) return
     appliedStyle[mv] = style
+    val placeholder = when (style) {
+        MapStyle.STANDARD, MapStyle.TOPO -> Color.rgb(242, 239, 233)
+        MapStyle.LIGHT -> Color.rgb(236, 236, 236)
+        MapStyle.DARK -> Color.rgb(36, 40, 48)
+        MapStyle.SATELLITE -> Color.rgb(28, 38, 30)
+    }
+    mv.overlayManager.tilesOverlay.loadingBackgroundColor = placeholder
+    mv.overlayManager.tilesOverlay.loadingLineColor = placeholder
     mv.overlayManager.tilesOverlay.setColorFilter(
         when (style) {
             MapStyle.LIGHT -> LIGHT_FILTER
@@ -565,19 +574,93 @@ private suspend fun animateZoomDecel(
     val startZoom = mapView.zoomLevelDouble
     val startLat = mapView.mapCenter.latitude
     val startLon = mapView.mapCenter.longitude
-    val frames = (durationMs / 16).coerceAtLeast(1)
-    for (i in 1..frames) {
-        if (manual()) return
-        val t = i.toDouble() / frames
+    prefetchTiles(mapView, target, targetZoom)
+    frameLoop(durationMs) { t, _ ->
+        if (manual()) return@frameLoop false
         val eased = 1 - Math.pow(1 - t, easePower)
         mapView.controller.setZoom(startZoom + (targetZoom - startZoom) * eased)
         mapView.controller.setCenter(
             GeoPoint(startLat + (target.latitude - startLat) * eased,
                 startLon + (target.longitude - startLon) * eased)
         )
-        kotlinx.coroutines.delay(16)
+        true
     }
 }
+
+/**
+ * Runs [frame] once per display frame for [durationMs], with t from 0 to 1 by elapsed time (so a slow
+ * frame never stretches the animation) and the time since the previous frame; false stops early.
+ */
+private suspend fun frameLoop(durationMs: Long, frame: (t: Double, dtMs: Double) -> Boolean) {
+    val start = withFrameNanos { it }
+    var last = start
+    while (true) {
+        val now = withFrameNanos { it }
+        val t = if (durationMs <= 0) 1.0 else ((now - start) / 1e6 / durationMs).coerceAtMost(1.0)
+        if (!frame(t, (now - last) / 1e6)) return
+        last = now
+        if (t >= 1.0) return
+    }
+}
+
+/**
+ * Asks for the tiles the view will show around [center] at the last few levels of a zoom to [zoom],
+ * so they are cached or on their way before the animation gets there. Normal on-demand tile loads
+ * (the tile provider's own queue), only earlier, not bulk downloading.
+ */
+private fun prefetchTiles(mapView: MapView, center: GeoPoint, zoom: Double, levels: Int = 4) {
+    val w = mapView.width
+    val h = mapView.height
+    if (w == 0 || h == 0) return
+    val provider = mapView.tileProvider
+    val src = provider.tileSource
+    val maxLevel = minOf(src.maximumZoomLevel, mapView.maxZoomLevel.toInt())
+    val top = minOf(Math.ceil(zoom).toInt(), maxLevel)
+    val tilePx = src.tileSizePixels * (if (mapView.isTilesScaledToDpi) mapView.context.resources.displayMetrics.density.coerceAtLeast(1f) else 1f)
+    for (level in top downTo maxOf(top - levels + 1, 1)) {
+        val n = 1 shl level
+        // On-screen size of one tile of this level at the target zoom (levels below are drawn enlarged).
+        val shown = tilePx * Math.pow(2.0, zoom - level)
+        val halfX = (w / shown / 2).toInt() + 1
+        val halfY = (h / shown / 2).toInt() + 1
+        val lat = center.latitude.coerceIn(-85.0, 85.0)
+        val cx = ((center.longitude + 180) / 360 * n).toInt()
+        val latR = Math.toRadians(lat)
+        val cy = ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n).toInt()
+        for (dy in -halfY..halfY) {
+            val y = cy + dy
+            if (y < 0 || y >= n) continue
+            for (dx in -halfX..halfX) {
+                val x = Math.floorMod(cx + dx, n)
+                provider.getMapTile(MapTileIndex.getTileIndex(level, x, y))
+            }
+        }
+    }
+}
+
+/** Tiles along a route at the zoom it is drawn at, so the map following the tip is already loaded. */
+private fun prefetchAlong(mapView: MapView, pts: List<GeoPoint>, zoom: Double) {
+    if (pts.isEmpty() || mapView.width == 0) return
+    val src = mapView.tileProvider.tileSource
+    val level = minOf(Math.round(zoom).toInt(), src.maximumZoomLevel).coerceAtLeast(1)
+    val n = 1 shl level
+    val seen = HashSet<Long>()
+    // A few tiles around points spaced about a tile apart, at most MAX_ROUTE_PREFETCH in all.
+    for (p in pts) {
+        val lat = Math.toRadians(p.latitude.coerceIn(-85.0, 85.0))
+        val x = ((p.longitude + 180) / 360 * n).toInt()
+        val y = ((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n).toInt()
+        for (dy in -1..1) for (dx in -1..1) {
+            val ty = y + dy
+            if (ty < 0 || ty >= n) continue
+            val idx = MapTileIndex.getTileIndex(level, Math.floorMod(x + dx, n), ty)
+            if (seen.add(idx)) mapView.tileProvider.getMapTile(idx)
+            if (seen.size >= MAX_ROUTE_PREFETCH) return
+        }
+    }
+}
+
+private const val MAX_ROUTE_PREFETCH = 90
 
 private suspend fun drawRoute(
     mapView: MapView,
@@ -650,6 +733,9 @@ private suspend fun drawRoute(
     val holdMs = minOf(500L, remaining / 6)
     val drawMs = (remaining - holdMs - zoomInMs).coerceAtLeast(0)
 
+    // Tiles along the leg and at the closing zoom on the destination start loading now.
+    if (!route.flight) prefetchAlong(mapView, full, mapView.zoomLevelDouble)
+    prefetchTiles(mapView, GeoPoint(bLat, bLon), 15.5)
     addOffRoad(mapView, route.head)
     val plane = TravelTipOverlay(travelMode, route.flight)
     mapView.overlays.add(plane)
@@ -666,9 +752,7 @@ private suspend fun drawRoute(
             cum[j] = cum[j - 1] + Math.sqrt(dx * dx + dy * dy)
         }
         val total = cum.last()
-        val steps = (drawMs / 40).coerceIn(4L, 900L)
-        for (i in 1..steps) {
-            val t = i.toDouble() / steps
+        frameLoop(drawMs) { t, dtMs ->
             val frac = t * t * (3 - 2 * t)
             val dist = frac * total
             var idx = java.util.Arrays.binarySearch(cum, dist).let { if (it >= 0) it else -it - 2 }
@@ -697,16 +781,18 @@ private suspend fun drawRoute(
             }
             line.setPoints(partial)
             onProgress(RouteProgress(to.uri, legKm, legKm * frac, route.flight))
-            if (!manual()) {
+            if (!manual() && partial.isNotEmpty()) {
                 val tip = partial.last()
                 val cLat = mapView.mapCenter.latitude
                 val cLon = mapView.mapCenter.longitude
+                // The camera closes a quarter of the gap every 40 ms, whatever the frame rate.
+                val follow = 1 - Math.pow(0.75, dtMs / 40.0)
                 mapView.controller.setCenter(
-                    GeoPoint(cLat + (tip.latitude - cLat) * 0.25, cLon + (tip.longitude - cLon) * 0.25)
+                    GeoPoint(cLat + (tip.latitude - cLat) * follow, cLon + (tip.longitude - cLon) * follow)
                 )
             }
             mapView.invalidate()
-            kotlinx.coroutines.delay(if (drawMs <= 0) 0L else drawMs / steps)
+            true
         }
         line.setPoints(full)
         onProgress(RouteProgress(to.uri, legKm, legKm, route.flight))

@@ -10,6 +10,11 @@ class SlideshowApp : Application() {
             userAgentValue = packageName
             osmdroidBasePath = cacheDir
             osmdroidTileCache = cacheDir.resolve("tiles")
+            // Zoom animations pass through many tile levels; a roomy memory cache keeps the levels
+            // already seen (and the ones fetched ahead) ready instead of reloading them mid-zoom.
+            cacheMapTileCount = 160
+            tileFileSystemMaxQueueSize = 120
+            tileDownloadMaxQueueSize = 120
         }
     }
 }
