@@ -53,9 +53,9 @@ class MusicPlayer(private val context: Context) {
         ensureTicking()
     }
 
-    /** Lowers music under a video clip's own sound. */
-    fun setDucked(ducked: Boolean) {
-        duckTarget = if (ducked) DUCK_LEVEL else 1f
+    /** Fades the music out under a video clip's own sound (and back in after it). */
+    fun setMuted(muted: Boolean) {
+        duckTarget = if (muted) 0f else 1f
         ensureTicking()
     }
 
@@ -198,7 +198,6 @@ class MusicPlayer(private val context: Context) {
         private const val TICK_MS = 40L
         private const val FADE_MS = 1800
         private const val DUCK_MS = 600
-        private const val DUCK_LEVEL = 0.2f
     }
 }
 

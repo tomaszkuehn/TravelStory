@@ -13,6 +13,8 @@ data class PhotoItem(
     val localTimeMs: Long? = dateTakenMs,
     val isVideo: Boolean = false,
     val durationMs: Long? = null,
+    /** Video only: whether the clip has a sound track; null when unknown (treated as having one). */
+    val hasAudio: Boolean? = null,
     var iso3: String? = null,
     var countryName: String? = null,
 )
@@ -33,4 +35,12 @@ data class ShowConfig(
     val maxVideoSec: Float = 20f,
     val dayTitles: Boolean = true,
     val placeNames: Boolean = true,
+    val travelMode: TravelMode = TravelMode.CAR,
+    /** Opening card: title over a faded collage of photos from the show. */
+    val introEnabled: Boolean = true,
+    /** Opening card title; blank means the photo folder's name. */
+    val introTitle: String = "",
 )
+
+/** How legs between photos are routed on roads (long hops are flights either way). */
+enum class TravelMode(val label: String) { CAR("Samochód"), BIKE("Rower"), FOOT("Pieszo") }

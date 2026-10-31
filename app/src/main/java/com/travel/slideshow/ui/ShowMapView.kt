@@ -20,9 +20,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.travel.slideshow.data.geo.CountryInfo
+import com.travel.slideshow.model.TravelMode
 import com.travel.slideshow.viewmodel.PinState
 import com.travel.slideshow.viewmodel.RouteState
 import com.travel.slideshow.viewmodel.ShowStep
+import com.travel.slideshow.viewmodel.pinKey
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
@@ -41,6 +43,8 @@ fun ShowMap(
     route: RouteState?,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
+    pinNumbers: Map<String, Int>,
+    travelMode: TravelMode,
     totalSec: Float,
     runId: Int,
     onMapTap: () -> Unit,
@@ -56,12 +60,13 @@ fun ShowMap(
         else -> step
     }
     SingleMapView(key, step, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
+        pinNumberMaps[mv] = pinNumbers
         when (step) {
             is ShowStep.WorldCountry -> drawWorldCountry(mv, step, visitedPins, manual)
-            is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, manual, { onArrived(step) })
+            is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, totalSec, elapsedMs, manual, { onArrived(step) })
             is ShowStep.RouteMap ->
                 drawRoute(
-                    mv, step, route, pastRoutes, visitedPins, totalSec, elapsedMs, manual,
+                    mv, step, route, pastRoutes, visitedPins, travelMode, totalSec, elapsedMs, manual,
                     { onArrived(step) }
                 )
             else -> {}
@@ -123,9 +128,21 @@ private class GesturingMapView(context: Context) : MapView(context) {
     }
 }
 
-private class AirplaneTipOverlay : Overlay() {
+/**
+ * Symbol at the tip of the line being drawn: a plane on flights, otherwise the chosen way of travel
+ * (a car seen from above, turned along the road; a bike or walker badge).
+ */
+private class TravelTipOverlay(private val mode: TravelMode, private val flight: Boolean) : Overlay() {
     var tip: GeoPoint? = null
     var bearingDeg = 0.0
+    private val dark = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(30, 40, 55)
+        style = Paint.Style.FILL
+    }
+    private val badgeText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 24f
+    }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.FILL
@@ -141,6 +158,44 @@ private class AirplaneTipOverlay : Overlay() {
         val px = projection.toPixels(t, null) ?: return
         canvas.save()
         canvas.translate(px.x.toFloat(), px.y.toFloat())
+        when {
+            flight -> drawPlane(canvas)
+            mode == TravelMode.CAR -> drawCar(canvas)
+            else -> drawBadge(canvas, if (mode == TravelMode.BIKE) "\uD83D\uDEB2" else "\uD83D\uDEB6")
+        }
+        canvas.restore()
+    }
+
+    /** Car from above, nose pointing along the bearing. */
+    private fun drawCar(canvas: Canvas) {
+        canvas.rotate(bearingDeg.toFloat())
+        canvas.scale(CAR_SCALE, CAR_SCALE)
+        // Wheels peek out from under the body.
+        for (y in floatArrayOf(-11f, 8f)) {
+            canvas.drawRoundRect(-11f, y, -7f, y + 7f, 1.5f, 1.5f, dark)
+            canvas.drawRoundRect(7f, y, 11f, y + 7f, 1.5f, 1.5f, dark)
+        }
+        canvas.drawRoundRect(-9f, -19f, 9f, 18f, 6f, 6f, fill)
+        canvas.drawRoundRect(-9f, -19f, 9f, 18f, 6f, 6f, stroke)
+        val windshield = Path().apply {
+            moveTo(-7f, -6f); lineTo(7f, -6f); lineTo(5.5f, -11f); lineTo(-5.5f, -11f); close()
+        }
+        canvas.drawPath(windshield, dark)
+        canvas.drawRoundRect(-6f, 9f, 6f, 13f, 1.5f, 1.5f, dark)
+        // Headlights.
+        canvas.drawCircle(-5f, -16.5f, 1.6f, dark)
+        canvas.drawCircle(5f, -16.5f, 1.6f, dark)
+    }
+
+    /** Upright emoji in a white disc (bike/walker icons don't read well when rotated). */
+    private fun drawBadge(canvas: Canvas, emoji: String) {
+        canvas.drawCircle(0f, 0f, 18f, fill)
+        canvas.drawCircle(0f, 0f, 18f, stroke)
+        val fm = badgeText.fontMetrics
+        canvas.drawText(emoji, 0f, -(fm.ascent + fm.descent) / 2, badgeText)
+    }
+
+    private fun drawPlane(canvas: Canvas) {
         canvas.rotate(bearingDeg.toFloat())
         val path = Path()
         path.moveTo(0f, -22f)
@@ -163,14 +218,84 @@ private class AirplaneTipOverlay : Overlay() {
         path.close()
         canvas.drawPath(path, fill)
         canvas.drawPath(path, stroke)
-        canvas.restore()
     }
 }
 
-private fun redPinDrawable(mapView: MapView): BitmapDrawable {
+/** Car tip symbol size relative to its drawn geometry (≈ 56 px long at 1.5). */
+private const val CAR_SCALE = 1.5f
+
+/** Pause on the place after the zoom-in, before the photos. */
+private const val LOCATION_HOLD_MS = 1000L
+
+private const val PIN_RED = 0xFFE53935.toInt()
+/** Pin bitmap geometry (px): head centre and radius, tip, bitmap height (the anchor is its bottom). */
+private const val PIN_BMP = 72f
+private const val PIN_HEAD_Y = 26f
+private const val PIN_HEAD_R = 17f
+private const val PIN_TOP = PIN_HEAD_Y - PIN_HEAD_R
+private const val PIN_TIP = 64f
+
+private val pinNumberMaps = java.util.WeakHashMap<MapView, Map<String, Int>>()
+
+/**
+ * Draws the visit order inside the heads of numbered pins. Digits are about half the pin's height
+ * when zoomed in and shrink when zoomed out, where pins crowd together; wide numbers stretch the head.
+ */
+private class PinNumbersOverlay : Overlay() {
+    val items = ArrayList<Pair<GeoPoint, Int>>()
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = PIN_RED }
+    private val pt = android.graphics.Point()
+
+    override fun draw(c: Canvas, mapView: MapView, shadow: Boolean) {
+        if (shadow || items.isEmpty()) return
+        val f = ((mapView.zoomLevelDouble - 4.0) / 8.0).coerceIn(0.65, 1.0).toFloat()
+        // Digit height is ~0.72 of the text size.
+        text.textSize = (PIN_TIP - PIN_TOP) * 0.5f / 0.72f * f
+        val fm = text.fontMetrics
+        val pj = mapView.projection
+        for ((g, n) in items) {
+            pj.toPixels(g, pt)
+            val cx = pt.x.toFloat()
+            val cy = pt.y - (PIN_BMP - PIN_HEAD_Y)
+            val label = n.toString()
+            val half = maxOf(PIN_HEAD_R, text.measureText(label) / 2 + 5f)
+            if (half > PIN_HEAD_R) {
+                c.drawRoundRect(cx - half, cy - PIN_HEAD_R, cx + half, cy + PIN_HEAD_R, PIN_HEAD_R, PIN_HEAD_R, bg)
+            }
+            c.drawText(label, cx, cy - (fm.ascent + fm.descent) / 2, text)
+        }
+    }
+}
+
+/** Red pin; a numbered one (visit order from the show) gets its number in the head instead of the dot. */
+private fun addPin(mapView: MapView, lat: Double, lon: Double, title: String?, icon: BitmapDrawable? = null) {
+    val number = pinNumberMaps[mapView]?.get(pinKey(lat, lon))
+    val marker = Marker(mapView).apply {
+        position = GeoPoint(lat, lon)
+        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+        this.icon = if (number == null) icon ?: redPinDrawable(mapView) else redPinDrawable(mapView, dot = false)
+        this.title = title
+    }
+    var numbers = mapView.overlays.filterIsInstance<PinNumbersOverlay>().firstOrNull()
+    if (numbers == null && number != null) {
+        numbers = PinNumbersOverlay()
+        mapView.overlays.add(numbers)
+    }
+    // Pins go under the numbers overlay so every number stays on top.
+    if (numbers != null) mapView.overlays.add(mapView.overlays.indexOf(numbers), marker)
+    else mapView.overlays.add(marker)
+    if (number != null) numbers?.items?.add(GeoPoint(lat, lon) to number)
+}
+
+private fun redPinDrawable(mapView: MapView, dot: Boolean = true): BitmapDrawable {
     val bmp = Bitmap.createBitmap(72, 72, Bitmap.Config.ARGB_8888)
     val c = Canvas(bmp)
-    val pin = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE53935.toInt() }
+    val pin = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = PIN_RED }
     c.drawCircle(36f, 26f, 17f, pin)
     val tail = Path()
     tail.moveTo(21f, 32f)
@@ -178,7 +303,7 @@ private fun redPinDrawable(mapView: MapView): BitmapDrawable {
     tail.lineTo(36f, 64f)
     tail.close()
     c.drawPath(tail, pin)
-    c.drawCircle(36f, 26f, 6.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE })
+    if (dot) c.drawCircle(36f, 26f, 6.5f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE })
     return BitmapDrawable(mapView.context.resources, bmp)
 }
 
@@ -242,7 +367,17 @@ private fun addPastRouteLines(mapView: MapView, pastRoutes: List<RouteState>, sk
         val line = routeLine(mapView, past.flight)
         line.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
         mapView.overlays.add(line)
+        addOffRoad(mapView, past.head)
+        addOffRoad(mapView, past.tail)
     }
+}
+
+/** Dashed bit between a photo pin and the road (photo taken off the road network). */
+private fun addOffRoad(mapView: MapView, pts: List<List<Double>>) {
+    if (pts.size < 2) return
+    val line = routeLine(mapView, flight = true)
+    line.setPoints(pts.map { GeoPoint(it[1], it[0]) })
+    mapView.overlays.add(line)
 }
 
 /** Road legs are solid; flights (long hops, no road connection) are dashed. */
@@ -259,16 +394,7 @@ private fun routeLine(mapView: MapView, flight: Boolean): Polyline {
 private fun addVisitedPins(mapView: MapView, pins: List<PinState>) {
     if (pins.isEmpty()) return
     val sharedIcon = redPinDrawable(mapView)
-    for (p in pins) {
-        mapView.overlays.add(
-            Marker(mapView).apply {
-                position = GeoPoint(p.lat, p.lon)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                icon = sharedIcon
-                title = p.title
-            }
-        )
-    }
+    for (p in pins) addPin(mapView, p.lat, p.lon, p.title, sharedIcon)
 }
 
 private suspend fun drawLocation(
@@ -276,6 +402,8 @@ private suspend fun drawLocation(
     step: ShowStep.LocationMap,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
+    totalSec: Float,
+    elapsedMs: Long,
     manual: () -> Boolean,
     onArrived: () -> Unit,
 ) {
@@ -286,14 +414,7 @@ private suspend fun drawLocation(
     addPastRouteLines(mapView, pastRoutes, photo.uri)
     addVisitedPins(mapView, visitedPins.filterNot { it.lat == lat && it.lon == lon })
     val geo = GeoPoint(lat, lon)
-    mapView.overlays.add(
-        Marker(mapView).apply {
-            position = geo
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            icon = redPinDrawable(mapView)
-            title = (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: "")
-        }
-    )
+    addPin(mapView, lat, lon, (photo.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (photo.countryName ?: ""))
     onArrived()
     waitManualHeld(manual)
     if (step.revisit) {
@@ -304,7 +425,10 @@ private suspend fun drawLocation(
     }
     mapView.controller.setZoom(4.0)
     mapView.controller.setCenter(geo)
-    animateZoomDecel(mapView, geo, 15.5, 1700L, manual)
+    // The zoom fills the step and eases out gently; the photos follow LOCATION_HOLD_MS after it lands.
+    val zoomMs = ((totalSec * 1000).toLong() - elapsedMs.coerceAtLeast(0) - LOCATION_HOLD_MS)
+        .coerceAtLeast(1700L)
+    animateZoomDecel(mapView, geo, 15.5, zoomMs, manual, easePower = 1.7)
     mapView.invalidate()
 }
 
@@ -314,6 +438,8 @@ private suspend fun animateZoomDecel(
     targetZoom: Double,
     durationMs: Long,
     manual: () -> Boolean = { false },
+    /** Ease-out strength: 3 brakes hard near the end, values closer to 1 slow down only slightly. */
+    easePower: Double = 3.0,
 ) {
     val startZoom = mapView.zoomLevelDouble
     val startLat = mapView.mapCenter.latitude
@@ -322,7 +448,7 @@ private suspend fun animateZoomDecel(
     for (i in 1..frames) {
         if (manual()) return
         val t = i.toDouble() / frames
-        val eased = 1 - Math.pow(1 - t, 3.0)
+        val eased = 1 - Math.pow(1 - t, easePower)
         mapView.controller.setZoom(startZoom + (targetZoom - startZoom) * eased)
         mapView.controller.setCenter(
             GeoPoint(startLat + (target.latitude - startLat) * eased,
@@ -338,6 +464,7 @@ private suspend fun drawRoute(
     route: RouteState?,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
+    travelMode: TravelMode,
     totalSec: Float,
     elapsedMs: Long,
     manual: () -> Boolean,
@@ -363,16 +490,9 @@ private suspend fun drawRoute(
     line.setPoints(listOf(full.first()))
     mapView.overlays.add(line)
 
-    mapView.overlays.add(
-        Marker(mapView).apply {
-            position = GeoPoint(aLat, aLon)
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            icon = redPinDrawable(mapView)
-            title = from.name
-        }
-    )
+    addPin(mapView, aLat, aLon, from.name)
 
-    var w = 180.0; var s = 90.0; var e = -180.0; var n = -90.0
+    var w = minOf(aLon, bLon); var s = minOf(aLat, bLat); var e = maxOf(aLon, bLon); var n = maxOf(aLat, bLat)
     for (p in full) {
         w = minOf(w, p.longitude)
         e = maxOf(e, p.longitude)
@@ -403,21 +523,34 @@ private suspend fun drawRoute(
     val holdMs = minOf(500L, remaining / 6)
     val drawMs = (remaining - holdMs - zoomInMs).coerceAtLeast(0)
 
-    val plane = AirplaneTipOverlay()
+    addOffRoad(mapView, route.head)
+    val plane = TravelTipOverlay(travelMode, route.flight)
     mapView.overlays.add(plane)
     kotlinx.coroutines.delay(holdMs)
 
     if (full.size >= 2) {
+        // Progress by distance, not by point index: a simplified route has few points on straight
+        // stretches and many in bends, which would make the tip speed up and slow down.
+        val k = Math.cos(Math.toRadians((aLat + bLat) / 2)).coerceAtLeast(0.2)
+        val cum = DoubleArray(full.size)
+        for (j in 1 until full.size) {
+            val dx = (full[j].longitude - full[j - 1].longitude) * k
+            val dy = full[j].latitude - full[j - 1].latitude
+            cum[j] = cum[j - 1] + Math.sqrt(dx * dx + dy * dy)
+        }
+        val total = cum.last()
         val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {
             val t = i.toDouble() / steps
             val frac = t * t * (3 - 2 * t)
-            val posF = frac * (full.size - 1)
-            val idx = posF.toInt()
+            val dist = frac * total
+            var idx = java.util.Arrays.binarySearch(cum, dist).let { if (it >= 0) it else -it - 2 }
+            idx = idx.coerceIn(0, full.size - 1)
             val partial = ArrayList<GeoPoint>(idx + 2)
-            for (k in 0..idx) partial.add(full[k])
+            for (q in 0..idx) partial.add(full[q])
             if (idx + 1 <= full.size - 1) {
-                val f = posF - idx
+                val segLen = cum[idx + 1] - cum[idx]
+                val f = if (segLen <= 0.0) 0.0 else (dist - cum[idx]) / segLen
                 val a = full[idx]
                 val b = full[idx + 1]
                 partial.add(
@@ -449,14 +582,8 @@ private suspend fun drawRoute(
         }
         line.setPoints(full)
         plane.tip = null
-        mapView.overlays.add(
-            Marker(mapView).apply {
-                position = GeoPoint(bLat, bLon)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                icon = redPinDrawable(mapView)
-                title = (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: "")
-            }
-        )
+        addOffRoad(mapView, route.tail)
+        addPin(mapView, bLat, bLon, (to.iso3?.let { CountryInfo.flagEmoji(it) + " " }) + (to.countryName ?: ""))
         onArrived()
         mapView.invalidate()
     }

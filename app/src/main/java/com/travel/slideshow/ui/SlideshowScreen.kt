@@ -1,6 +1,7 @@
 package com.travel.slideshow.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -51,7 +52,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -86,6 +89,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.model.PhotoItem
+import com.travel.slideshow.viewmodel.DayBadge
 import com.travel.slideshow.viewmodel.ShowStep
 import com.travel.slideshow.viewmodel.ShowViewModel
 import com.travel.slideshow.viewmodel.UiState
@@ -100,7 +104,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun SlideshowScreen(vm: ShowViewModel) {
     val st by vm.state.collectAsState()
-    val idleLike = st.step is ShowStep.Idle || st.step is ShowStep.Finished
+    val awaiting = st.awaitingStart && st.step is ShowStep.Intro
+    val idleLike = st.step is ShowStep.Idle || st.step is ShowStep.Finished || awaiting
 
     Box(
         Modifier
@@ -119,19 +124,20 @@ fun SlideshowScreen(vm: ShowViewModel) {
         var showPhotoLayer by remember { mutableStateOf(false) }
         val mapAlpha = remember { Animatable(0f) }
         val photoAlpha = remember { Animatable(0f) }
-        var dayCard by remember { mutableStateOf<ShowStep.DayTitle?>(null) }
-        val dayAlpha = remember { Animatable(0f) }
+        var introCard by remember { mutableStateOf<ShowStep.Intro?>(null) }
+        val introAlpha = remember { Animatable(0f) }
 
         LaunchedEffect(st.step) {
             val s = st.step
-            if (s is ShowStep.DayTitle) {
-                dayCard = s
-                dayAlpha.animateTo(1f, fadeSpec)
-            } else if (dayCard != null) {
-                dayAlpha.animateTo(0f, fadeSpec)
-                dayCard = null
+            if (s is ShowStep.Intro) {
+                introCard = s
+                introAlpha.animateTo(1f, fadeSpec)
+            } else if (introCard != null) {
+                introAlpha.animateTo(0f, fadeSpec)
+                introCard = null
             }
         }
+
 
         LaunchedEffect(st.step) {
             when (val s = st.step) {
@@ -179,6 +185,8 @@ fun SlideshowScreen(vm: ShowViewModel) {
                         route,
                         st.pastRoutes,
                         st.visitedPins,
+                        st.pinNumbers,
+                        st.config.travelMode,
                         st.config.locationMapSec,
                         st.runId,
                         { vm.togglePause() },
@@ -189,15 +197,16 @@ fun SlideshowScreen(vm: ShowViewModel) {
                     )
                 }
             }
-            dayCard?.let { card ->
-                Box(Modifier.fillMaxSize().graphicsLayer { alpha = dayAlpha.value }) {
-                    DayTitleView(card, st.placeNames)
+            introCard?.let { card ->
+                Box(Modifier.fillMaxSize().graphicsLayer { alpha = introAlpha.value }) {
+                    IntroView(card, st.config.introTitle.ifBlank { st.photoFolderName ?: "Moja podróż" })
                 }
             }
             when (val s = st.step) {
                 is ShowStep.Idle -> IdleView(st, vm)
                 is ShowStep.Scanning -> ScanningView(st, s, vm)
                 is ShowStep.Finished -> FinishedView(vm)
+                is ShowStep.Intro -> if (awaiting) StartBar(st, vm)
                 else -> {}
             }
         }
@@ -224,7 +233,7 @@ fun SlideshowScreen(vm: ShowViewModel) {
         ControlsOverlay(
             vm = vm,
             st = st,
-            visible = st.paused || idleLike,
+            visible = st.paused || (idleLike && !awaiting),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
@@ -246,84 +255,180 @@ private fun InfoChip(st: UiState, modifier: Modifier) {
         else -> photo?.let { stFlag(it)?.first }
     }
     val place = if (st.config.placeNames) placeOf(photo, st.placeNames) else null
-    if (flag == null && place == null) return
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    val onShowStep = st.step is ShowStep.WorldCountry || st.step is ShowStep.LocationMap ||
+        st.step is ShowStep.RouteMap || st.step is ShowStep.Photo
+    val badge = st.dayBadge?.takeIf { onShowStep }
+    // Remembered so the note can fade out after the segment that carried it.
+    var shownBadge by remember { mutableStateOf<DayBadge?>(null) }
+    if (badge != null) shownBadge = badge
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = modifier
             .statusBarsPadding()
             .padding(top = 10.dp)
-            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
-            .padding(horizontal = 9.dp, vertical = 2.dp)
     ) {
-        flag?.let { Text(it, fontSize = 20.sp) }
-        place?.let { Text(it, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+        if (flag != null || place != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+                    .padding(horizontal = 9.dp, vertical = 2.dp)
+            ) {
+                flag?.let { Text(it, fontSize = 20.sp) }
+                place?.let { Text(it, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium) }
+            }
+        }
+        AnimatedVisibility(visible = badge != null, enter = fadeIn(tween(600)), exit = fadeOut(tween(600))) {
+            shownBadge?.let { DayNote(it) }
+        }
     }
 }
 
+/** Compact "Dzień 3  14.07.2025" under the flag on the first map or photo of a new day. */
 @Composable
-private fun DayTitleView(card: ShowStep.DayTitle, names: Map<String, String>) {
-    val place = placeOf(card.photo, names) ?: card.photo?.countryName
-    val date = remember(card.localDayMs) {
+private fun DayNote(badge: DayBadge) {
+    val date = remember(badge.localDayMs) {
         // localDayMs is wall-clock midnight encoded as UTC, so format it in UTC.
-        SimpleDateFormat("EEEE, d MMMM yyyy", Locale("pl"))
+        SimpleDateFormat("dd.MM.yyyy", Locale.US)
             .apply { timeZone = TimeZone.getTimeZone("UTC") }
-            .format(Date(card.localDayMs))
+            .format(Date(badge.localDayMs))
     }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+            .padding(horizontal = 8.dp, vertical = 1.dp)
+    ) {
+        Text("Dzień ${badge.dayNumber}", color = Color(0xFFFFB74D), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(date, color = Color.White, fontSize = 12.sp)
+    }
+}
+
+/** Opening card: title, dates and flags over a slowly zooming, faded collage of show photos. */
+@Composable
+private fun IntroView(card: ShowStep.Intro, title: String) {
+    val dates = remember(card.fromMs, card.toMs) { dateRange(card.fromMs, card.toMs) }
+    val zoom = remember(card) { Animatable(1f) }
+    LaunchedEffect(card) { zoom.animateTo(1.08f, tween(9000, easing = LinearEasing)) }
     Box(Modifier.fillMaxSize().background(Color.Black))
-    card.backdrop?.let { DayBackdrop(it) }
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .clipToBounds()
+            .graphicsLayer { scaleX = zoom.value; scaleY = zoom.value }
+    ) {
+        val n = card.photos.size
+        val landscape = maxWidth > maxHeight
+        val (cols, rows) = when {
+            n <= 1 -> 1 to 1
+            n == 2 -> if (landscape) 2 to 1 else 1 to 2
+            n == 3 -> if (landscape) 3 to 1 else 1 to 3
+            n == 4 -> 2 to 2
+            else -> if (landscape) 3 to 2 else 2 to 3
+        }
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            for (r in 0 until rows) {
+                Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    for (c in 0 until cols) {
+                        val p = card.photos.getOrNull(r * cols + c)
+                        Box(Modifier.weight(1f).fillMaxSize().clipToBounds()) {
+                            if (p != null) {
+                                Image(
+                                    rememberAsyncImagePainter(
+                                        ImageRequest.Builder(LocalContext.current).data(p.uri).crossfade(true).build()
+                                    ),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize().graphicsLayer { alpha = INTRO_PHOTO_ALPHA },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Darker middle keeps the title readable over bright photos.
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.radialGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
+    )
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp)
+            .padding(28.dp)
     ) {
-        Text("Dzień ${card.dayNumber}", color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.Bold)
-        place?.let {
-            val flag = card.photo?.let { p -> stFlag(p)?.first }
+        Text(
+            title,
+            color = Color.White,
+            fontSize = 50.sp,
+            lineHeight = 56.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+        )
+        dates?.let {
+            Text(it, color = Color(0xFFFFB74D), fontSize = 22.sp, modifier = Modifier.padding(top = 12.dp))
+        }
+        if (card.countries.isNotEmpty()) {
             Text(
-                "— $it" + (flag?.let { f -> "  $f" } ?: ""),
-                color = Color(0xFFFFB74D),
-                fontSize = 28.sp,
-                modifier = Modifier.padding(top = 6.dp)
+                card.countries.take(12).joinToString("  ") { CountryInfo.flagEmoji(it) },
+                fontSize = 26.sp,
+                modifier = Modifier.padding(top = 14.dp)
             )
         }
-        Text(date, color = Color(0xFFBDBDBD), fontSize = 16.sp, modifier = Modifier.padding(top = 14.dp))
     }
 }
 
-/** Faded first photo of the day; one narrower than 70% of the screen is enlarged to that width and cropped. */
+/** Start button under the opening card while it waits for the show to be started. */
 @Composable
-private fun DayBackdrop(photo: PhotoItem) {
-    val painter = rememberAsyncImagePainter(
-        ImageRequest.Builder(LocalContext.current)
-            .data(photo.uri)
-            .crossfade(true)
-            .build()
-    )
-    val imgSize = (painter.state as? AsyncImagePainter.State.Success)?.painter?.intrinsicSize
-    BoxWithConstraints(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
-        if (imgSize == null || !imgSize.isSpecified || imgSize.width <= 0f || imgSize.height <= 0f) {
-            Image(painter, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().graphicsLayer { alpha = DAY_BACKDROP_ALPHA })
-            return@BoxWithConstraints
+private fun StartBar(st: UiState, vm: ShowViewModel) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Bottom,
+        modifier = Modifier
+            .fillMaxSize()
+            .navigationBarsPadding()
+            .padding(bottom = 28.dp)
+    ) {
+        st.message?.let {
+            Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
         }
-        val aspect = imgSize.width / imgSize.height
-        val fitW = minOf(maxWidth, maxHeight * aspect)
-        val w = maxOf(fitW, maxWidth * DAY_BACKDROP_MIN_WIDTH)
-        Image(
-            painter,
-            contentDescription = null,
-            contentScale = ContentScale.FillBounds,
-            modifier = Modifier
-                .requiredSize(w, w / aspect)
-                .graphicsLayer { alpha = DAY_BACKDROP_ALPHA }
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = { vm.start() }) { Text("▶ Start", fontSize = 18.sp) }
+            IconButton(
+                onClick = { vm.setSettingsVisible(true) },
+                modifier = Modifier.background(Color.Black.copy(alpha = 0.35f), CircleShape)
+            ) {
+                Icon(Icons.Filled.Settings, contentDescription = "Ustawienia", tint = Color.White)
+            }
+        }
     }
 }
 
-private const val DAY_BACKDROP_MIN_WIDTH = 0.7f
-private const val DAY_BACKDROP_ALPHA = 0.4f
+/** "12–19 lipca 2025", "28 czerwca – 3 lipca 2025" or "30 grudnia 2024 – 2 stycznia 2025"; times are wall clock as UTC. */
+private fun dateRange(fromMs: Long?, toMs: Long?): String? {
+    if (fromMs == null || toMs == null) return null
+    val pl = Locale("pl")
+    val utc = TimeZone.getTimeZone("UTC")
+    fun fmt(pattern: String, ms: Long) =
+        SimpleDateFormat(pattern, pl).apply { timeZone = utc }.format(Date(ms))
+    val y1 = fmt("yyyy", fromMs); val y2 = fmt("yyyy", toMs)
+    val m1 = fmt("MM", fromMs); val m2 = fmt("MM", toMs)
+    val d1 = fmt("d", fromMs); val d2 = fmt("d", toMs)
+    return when {
+        y1 != y2 -> fmt("d MMMM yyyy", fromMs) + " – " + fmt("d MMMM yyyy", toMs)
+        m1 != m2 -> fmt("d MMMM", fromMs) + " – " + fmt("d MMMM yyyy", toMs)
+        d1 != d2 -> "$d1–" + fmt("d MMMM yyyy", toMs)
+        else -> fmt("d MMMM yyyy", fromMs)
+    }
+}
+
+private const val INTRO_PHOTO_ALPHA = 0.38f
 
 private fun stFlag(photo: PhotoItem): Pair<String, String>? {
     val iso = photo.iso3 ?: return null

@@ -63,6 +63,7 @@ class PhotoRepository(private val context: Context) {
                             localTimeMs = meta.local ?: fallback?.let { it + localOffset(it) },
                             isVideo = video,
                             durationMs = meta.durationMs,
+                            hasAudio = meta.hasAudio,
                         )
                     )
                     onProgress(result.size)
@@ -88,6 +89,7 @@ class PhotoRepository(private val context: Context) {
         val lat: Double?,
         val lon: Double?,
         val durationMs: Long? = null,
+        val hasAudio: Boolean? = null,
     )
 
     private val noMeta = MediaMeta(null, null, null, null)
@@ -100,6 +102,7 @@ class PhotoRepository(private val context: Context) {
         return try {
             mmr.setDataSource(context, uri)
             val duration = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            val hasAudio = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)?.let { it == "yes" }
             // ISO-6709, e.g. "+52.2297+021.0122/"
             val loc = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
             val m = loc?.let { Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""").find(it) }
@@ -116,7 +119,7 @@ class PhotoRepository(private val context: Context) {
                             .parse(raw.substring(0, 15))?.time
                     }.getOrNull()
                 }
-            MediaMeta(instant, instant?.let { it + localOffset(it) }, lat, lon, duration)
+            MediaMeta(instant, instant?.let { it + localOffset(it) }, lat, lon, duration, hasAudio)
         } catch (e: Exception) {
             noMeta
         } finally {

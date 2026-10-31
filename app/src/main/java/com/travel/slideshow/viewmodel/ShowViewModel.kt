@@ -19,6 +19,7 @@ import com.travel.slideshow.media.MusicPlayer
 import com.travel.slideshow.media.MusicResolver
 import com.travel.slideshow.model.PhotoItem
 import com.travel.slideshow.model.ShowConfig
+import com.travel.slideshow.model.TravelMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,14 +40,14 @@ sealed interface ShowStep {
     data class RouteMap(val from: PhotoItem, val photo: PhotoItem) : ShowStep
     data class Photo(val photo: PhotoItem) : ShowStep
     /**
-     * Title card "Dzień N — place"; [localDayMs] is local midnight encoded as UTC, [photo] names the place,
-     * [backdrop] is the day's first still photo, shown faded behind the text.
+     * Opening card: configurable title over a faded collage of [photos] sampled across the show.
+     * [fromMs]/[toMs] are the first/last local times (wall clock encoded as UTC), [countries] ISO3 in show order.
      */
-    data class DayTitle(
-        val dayNumber: Int,
-        val localDayMs: Long,
-        val photo: PhotoItem?,
-        val backdrop: PhotoItem? = null,
+    data class Intro(
+        val photos: List<PhotoItem>,
+        val fromMs: Long?,
+        val toMs: Long?,
+        val countries: List<String>,
     ) : ShowStep
     data object Finished : ShowStep
 }
@@ -58,14 +59,30 @@ fun placeOf(photo: PhotoItem?, names: Map<String, String>): String? {
     return names[PlaceResolver.key(lat, lon)]
 }
 
-/** [flight]: drawn as a dashed arc (long hop or no road connection) instead of a road. */
-data class RouteState(val uri: Uri, val points: List<List<Double>>, val flight: Boolean = false)
+/**
+ * [flight]: drawn as a dashed arc (long hop or no road connection) instead of a road.
+ * [head]/[tail]: dashed off-road bits between the photo pins and the road.
+ */
+data class RouteState(
+    val uri: Uri,
+    val points: List<List<Double>>,
+    val flight: Boolean = false,
+    val head: List<List<Double>> = emptyList(),
+    val tail: List<List<Double>> = emptyList(),
+)
 
-private fun Route.toState(uri: Uri) = RouteState(uri, points, flight)
+private fun Route.toState(uri: Uri) = RouteState(uri, points, flight, head, tail)
 
 data class PinState(val lat: Double, val lon: Double, val title: String? = null)
 
-data class Segment(val step: ShowStep, val durMs: Long, val musicIso3: String? = null)
+/** Identity of a map pin; photos within ~1 m share one. */
+fun pinKey(lat: Double, lon: Double): String = String.format(java.util.Locale.US, "%.5f,%.5f", lat, lon)
+
+/** "Dzień N" note shown under the flag when a new day starts; [localDayMs] is local midnight encoded as UTC. */
+data class DayBadge(val dayNumber: Int, val localDayMs: Long)
+
+/** [day]: set on the first map or photo of a new calendar day. */
+data class Segment(val step: ShowStep, val durMs: Long, val musicIso3: String? = null, val day: DayBadge? = null)
 
 data class UiState(
     val step: ShowStep = ShowStep.Idle,
@@ -84,6 +101,12 @@ data class UiState(
     val visitedPins: List<PinState> = emptyList(),
     /** PlaceResolver.key → town name. */
     val placeNames: Map<String, String> = emptyMap(),
+    /** New-day note for the current segment. */
+    val dayBadge: DayBadge? = null,
+    /** [pinKey] → order in which the show reaches that pin (1-based). */
+    val pinNumbers: Map<String, Int> = emptyMap(),
+    /** The opening card is shown as the ready screen and waits for Start. */
+    val awaitingStart: Boolean = false,
     val runId: Int = 0,
 )
 
@@ -109,6 +132,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private val stopScan = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastPhotos: List<PhotoItem> = emptyList()
     private var segments: List<Segment> = emptyList()
+        set(value) {
+            field = value
+            _state.update { it.copy(pinNumbers = numberPins(value)) }
+        }
     private var segIdx = 0
     private var blockReplayUri: String? = null
     private var driver: Job? = null
@@ -158,6 +185,9 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             .putFloat(PREF_VIDEO_MAX, cfg.maxVideoSec)
             .putBoolean(PREF_DAY_TITLES, cfg.dayTitles)
             .putBoolean(PREF_PLACES, cfg.placeNames)
+            .putString(PREF_TRAVEL_MODE, cfg.travelMode.name)
+            .putBoolean(PREF_INTRO_ON, cfg.introEnabled)
+            .putString(PREF_INTRO_TITLE, cfg.introTitle)
             .apply()
         musicPlayer.setVolume(cfg.musicVolumePct / 100f * 0.85f)
         if (old.placeNames != cfg.placeNames) {
@@ -174,7 +204,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             old.worldMapSec != cfg.worldMapSec ||
             old.distanceKmThreshold != cfg.distanceKmThreshold ||
             old.maxVideoSec != cfg.maxVideoSec ||
-            old.dayTitles != cfg.dayTitles
+            old.dayTitles != cfg.dayTitles ||
+            old.introEnabled != cfg.introEnabled
         ) {
             pendingRebuild = true
         }
@@ -196,7 +227,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             segIdx = 0
             setPaused(false)
             resetTrail()
-            _state.value = _state.value.copy(step = ShowStep.Idle, message = null)
+            _state.value = _state.value.copy(message = null)
+            showReady()
             return
         }
         val photoUri = currentPhotoUri()
@@ -208,6 +240,18 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             segIdx = segments.indexOfFirst { (it.step as? ShowStep.Photo)?.photo?.uri == photoUri }
                 .coerceAtLeast(0)
             relaunch(syncMusic = true)
+        } else if (!running && (_state.value.step is ShowStep.Idle || _state.value.awaitingStart)) {
+            // Intro switched on/off or its photos changed while waiting for Start.
+            showReady()
+        }
+    }
+
+    /** Ready to play: the opening card (waiting for Start) when enabled, otherwise the idle screen. */
+    private fun showReady() {
+        val intro = segments.firstOrNull()?.step as? ShowStep.Intro
+        _state.update {
+            if (intro != null) it.copy(step = intro, awaitingStart = true, dayBadge = null)
+            else it.copy(step = ShowStep.Idle, awaitingStart = false, dayBadge = null)
         }
     }
 
@@ -270,6 +314,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     fun start() { restartAll() }
 
     fun restartAll() {
+        _state.update { it.copy(awaitingStart = false) }
         stopMusic()
         driver?.cancel()
         segIdx = 0
@@ -347,7 +392,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Day being shown at [i]: the card's day, or that of the next dated photo. */
     private fun dayAt(i: Int): Long? {
-        (segments.getOrNull(i)?.step as? ShowStep.DayTitle)?.let { return it.localDayMs / DAY_MS }
+        segments.getOrNull(i)?.day?.let { return it.localDayMs / DAY_MS }
         return (i until segments.size).firstNotNullOfOrNull { photoDay(it) }
     }
 
@@ -363,18 +408,11 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     if (d != null && day != null && d != day) break
                     first = i
                 }
-                is ShowStep.DayTitle -> {
-                    if (day == null || st.localDayMs / DAY_MS == day) return i
-                    break
-                }
                 else -> {}
             }
             i--
         }
-        while (first > 0 && segments[first - 1].step.let {
-                it is ShowStep.WorldCountry || it is ShowStep.LocationMap || it is ShowStep.RouteMap
-            }
-        ) first--
+        while (first > 0 && isLeadIn(segments[first - 1].step)) first--
         return first
     }
 
@@ -471,9 +509,9 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             lastPhotos = items
             segments = buildSegments(items)
             startGeocoding()
+            showReady()
             _state.update {
                 it.copy(
-                    step = ShowStep.Idle,
                     itemCount = items.size,
                     withLocation = located,
                     message = when {
@@ -559,14 +597,40 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), revisitMs)
             }
         }
-        return if (cfg.dayTitles) withDayTitles(segs, filtered) else segs
+        val withDays = if (cfg.dayTitles) withDayTitles(segs, filtered) else segs
+        return if (cfg.introEnabled) withIntro(withDays, filtered) else withDays
+    }
+
+    /**
+     * Puts the opening card first. It starts the first country's music, so that country's world-map
+     * segment no longer restarts the track.
+     */
+    private fun withIntro(segs: List<Segment>, photos: List<PhotoItem>): List<Segment> {
+        if (segs.isEmpty()) return segs
+        val stills = photos.filter { !it.isVideo }
+        val picked = if (stills.size <= INTRO_PHOTOS) stills else List(INTRO_PHOTOS) { i ->
+            stills[(i * (stills.size - 1).toDouble() / (INTRO_PHOTOS - 1)).toInt()]
+        }
+        val times = photos.mapNotNull { it.localTimeMs }
+        val countries = photos.mapNotNull { it.iso3 }.distinct()
+        val iso = countries.firstOrNull()
+        val out = ArrayList<Segment>(segs.size + 1)
+        out += Segment(ShowStep.Intro(picked, times.minOrNull(), times.maxOrNull(), countries), INTRO_MS, iso)
+        var handedOver = false
+        for (seg in segs) {
+            if (!handedOver && seg.musicIso3 != null) {
+                handedOver = true
+                out += if (seg.musicIso3 == iso) seg.copy(musicIso3 = null) else seg
+            } else out += seg
+        }
+        return out
     }
 
     private fun dayOf(p: PhotoItem): Long? = p.localTimeMs?.let { Math.floorDiv(it, DAY_MS) }
 
     /**
-     * Inserts a "Dzień N" card whenever the calendar day changes. The card goes before the maps
-     * leading to the day's first photo, so the trip to a new place is introduced by its day.
+     * Marks the first segment of each calendar day with a "Dzień N" note: the first of the maps leading
+     * to the day's first photo (not a revisit of the previous place), or that photo itself.
      */
     private fun withDayTitles(segs: List<Segment>, photos: List<PhotoItem>): List<Segment> {
         val days = photos.mapNotNull { dayOf(it) }.toSortedSet()
@@ -580,31 +644,29 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             dayNumber[d] = (d - tripStart + 1).toInt()
             prev = d
         }
-        val placeFor = HashMap<Long, PhotoItem>()
-        val backdropFor = HashMap<Long, PhotoItem>()
-        for (p in photos) {
-            val d = dayOf(p) ?: continue
-            if (p.lat != null && p.lon != null && d !in placeFor) placeFor[d] = p
-            if (!p.isVideo && d !in backdropFor) backdropFor[d] = p
-        }
-        val out = ArrayList<Segment>(segs.size + days.size)
+        val out = segs.toMutableList()
         var lastDay: Long? = null
-        for (seg in segs) {
-            val p = (seg.step as? ShowStep.Photo)?.photo
-            val d = p?.let { dayOf(it) }
-            if (d != null && d != lastDay) {
-                var at = out.size
-                while (at > 0 && out[at - 1].step.let {
-                        it is ShowStep.WorldCountry || it is ShowStep.LocationMap || it is ShowStep.RouteMap
-                    }
-                ) at--
-                out.add(at, Segment(ShowStep.DayTitle(dayNumber[d] ?: 1, d * DAY_MS, placeFor[d], backdropFor[d]), DAY_TITLE_MS))
-                lastDay = d
-            }
-            out += seg
+        for (i in out.indices) {
+            val d = (out[i].step as? ShowStep.Photo)?.photo?.let { dayOf(it) } ?: continue
+            if (d == lastDay) continue
+            lastDay = d
+            var at = i
+            while (at > 0 && isLeadIn(out[at - 1].step)) at--
+            val badge = DayBadge(dayNumber[d] ?: 1, d * DAY_MS)
+            out[at] = out[at].copy(day = badge)
+            // The zoomed-out world map is brief; keep the note through its zoom-in too.
+            val st = out[at].step
+            if (st is ShowStep.WorldCountry && !st.zoomedIn && at + 1 < out.size &&
+                (out[at + 1].step as? ShowStep.WorldCountry)?.zoomedIn == true
+            ) out[at + 1] = out[at + 1].copy(day = badge)
         }
         return out
     }
+
+    /** Maps that lead to the next photo (a revisit belongs to the previous one). */
+    private fun isLeadIn(step: ShowStep): Boolean =
+        step is ShowStep.WorldCountry || step is ShowStep.RouteMap ||
+            (step is ShowStep.LocationMap && !step.revisit)
 
     /** Looks up town names for every located photo in show order; results stream into [UiState.placeNames]. */
     private fun startGeocoding() {
@@ -616,7 +678,6 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                 is ShowStep.Photo -> st.photo
                 is ShowStep.LocationMap -> st.photo
                 is ShowStep.RouteMap -> st.photo
-                is ShowStep.DayTitle -> st.photo
                 else -> null
             } ?: continue
             val lat = p.lat ?: continue
@@ -637,7 +698,9 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
-        String.format(java.util.Locale.US, "%.5f,%.5f|%.5f,%.5f", lat1, lon1, lat2, lon2)
+        String.format(
+            java.util.Locale.US, "%s|%.5f,%.5f|%.5f,%.5f", _state.value.config.travelMode, lat1, lon1, lat2, lon2,
+        )
 
     private fun routeKey(step: ShowStep.RouteMap): String? {
         val from = step.from
@@ -659,7 +722,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (!routeInFlight.add(key)) return
         viewModelScope.launch {
-            val fetched = routeResolver.resolve(from.lat!!, from.lon!!, to.lat!!, to.lon!!)
+            val fetched = routeResolver.resolve(_state.value.config.travelMode, from.lat!!, from.lon!!, to.lat!!, to.lon!!)
             routeInFlight.remove(key)
             if (fetched == null) routeRetryAt[key] = System.currentTimeMillis() + ROUTE_RETRY_MS
             else routeRetryAt.remove(key)
@@ -712,7 +775,23 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         return PinState(lat, lon, title)
     }
 
-    private fun pinKey(pin: PinState): String = "%.5f,%.5f".format(pin.lat, pin.lon)
+    private fun pinKey(pin: PinState): String = pinKey(pin.lat, pin.lon)
+
+    /** Numbers the pins in the order the show arrives at them (location maps and route ends). */
+    private fun numberPins(segs: List<Segment>): Map<String, Int> {
+        val out = LinkedHashMap<String, Int>()
+        for (seg in segs) {
+            val p = when (val st = seg.step) {
+                is ShowStep.LocationMap -> st.photo
+                is ShowStep.RouteMap -> st.photo
+                else -> null
+            } ?: continue
+            val lat = p.lat ?: continue
+            val lon = p.lon ?: continue
+            out.putIfAbsent(pinKey(lat, lon), out.size + 1)
+        }
+        return out
+    }
 
     private fun resetTrail() = rebuildTrail(0)
 
@@ -782,7 +861,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                             is ShowStep.Photo -> st.photo.iso3
                             is ShowStep.LocationMap -> st.photo.iso3
                             is ShowStep.RouteMap -> st.photo.iso3
-                            is ShowStep.DayTitle -> st.photo?.iso3
+                            is ShowStep.WorldCountry -> st.country.iso3
+                            is ShowStep.Intro -> st.countries.firstOrNull()
                             else -> null
                         }
                         // Jumps inside the same country keep the current track.
@@ -790,9 +870,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 if (seg.musicIso3 != null) playMusicFor(seg.musicIso3, force = true)
-                // Clips have their own sound; the music steps back while one plays.
-                musicPlayer.setDucked((seg.step as? ShowStep.Photo)?.photo?.isVideo == true)
-                _state.value = _state.value.copy(message = null, step = seg.step)
+                // A clip with its own sound silences the music while it plays; a silent clip keeps it.
+                val clip = (seg.step as? ShowStep.Photo)?.photo?.takeIf { it.isVideo }
+                musicPlayer.setMuted(clip != null && clip.hasAudio != false)
+                _state.value = _state.value.copy(message = null, step = seg.step, dayBadge = seg.day)
                 pausableDelay(seg.durMs)
             }
             setFinished()
@@ -820,7 +901,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         // skipNext() can finish the show from outside the driver; stop it from overwriting the step.
         driver?.cancel()
         _state.value = _state.value.copy(stopped = true, step = ShowStep.Finished)
-        musicPlayer.setDucked(false)
+        musicPlayer.setMuted(false)
         stopMusic()
     }
 
@@ -843,6 +924,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             maxVideoSec = prefs.getFloat(PREF_VIDEO_MAX, 20f),
             dayTitles = prefs.getBoolean(PREF_DAY_TITLES, true),
             placeNames = prefs.getBoolean(PREF_PLACES, true),
+            travelMode = runCatching { TravelMode.valueOf(prefs.getString(PREF_TRAVEL_MODE, null)!!) }
+                .getOrDefault(TravelMode.CAR),
+            introEnabled = prefs.getBoolean(PREF_INTRO_ON, true),
+            introTitle = prefs.getString(PREF_INTRO_TITLE, "") ?: "",
         )
     }
 
@@ -869,8 +954,13 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         private const val PREF_VIDEO_MAX = "video_max_sec"
         private const val PREF_DAY_TITLES = "day_titles"
         private const val PREF_PLACES = "place_names"
+        private const val PREF_TRAVEL_MODE = "travel_mode"
+        private const val PREF_INTRO_ON = "intro_on"
+        private const val PREF_INTRO_TITLE = "intro_title"
+        /** After Start the card lingers while the music begins; before Start it waits indefinitely. */
+        private const val INTRO_MS = 3000L
+        private const val INTRO_PHOTOS = 6
         private const val DAY_MS = 86_400_000L
-        private const val DAY_TITLE_MS = 3200L
         /** A gap of more days than this without photos starts a new trip (day numbering restarts). */
         private const val TRIP_GAP_DAYS = 3
     }

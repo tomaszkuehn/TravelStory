@@ -15,11 +15,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -33,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.travel.slideshow.model.TravelMode
 import com.travel.slideshow.viewmodel.ShowViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -117,14 +120,45 @@ fun SettingsScreen(vm: ShowViewModel) {
                     })
                 }
 
-                ToggleRow("Pokazuj filmy", "krótkie klipy z folderu, muzyka ściszana na czas filmu", cfg.showVideos) { on ->
+                ToggleRow("Pokazuj filmy", "krótkie klipy z folderu, muzyka wyciszana na czas filmu z dźwiękiem", cfg.showVideos) { on ->
                     vm.updateConfig { it.copy(showVideos = on) }
                 }
-                ToggleRow("Plansze dni podróży", "„Dzień 3 — Florencja” przy zmianie dnia", cfg.dayTitles) { on ->
+                ToggleRow("Ekran startowy", "tytuł na tle półprzezroczystego kolażu zdjęć z pokazu", cfg.introEnabled) { on ->
+                    vm.updateConfig { it.copy(introEnabled = on) }
+                }
+                if (cfg.introEnabled) {
+                    OutlinedTextField(
+                        value = cfg.introTitle,
+                        onValueChange = { t -> vm.updateConfig { it.copy(introTitle = t.take(80)) } },
+                        label = { Text("Tytuł pokazu") },
+                        placeholder = { Text(st.photoFolderName ?: "Moja podróż") },
+                        supportingText = { Text("puste — nazwa folderu ze zdjęciami") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                ToggleRow("Informacja o dniu podróży", "„Dzień 3” i data pod flagą na pierwszej mapie lub zdjęciu nowego dnia", cfg.dayTitles) { on ->
                     vm.updateConfig { it.copy(dayTitles = on) }
                 }
                 ToggleRow("Nazwy miejsc", "z internetu (OpenStreetMap Nominatim), zapamiętywane", cfg.placeNames) { on ->
                     vm.updateConfig { it.copy(placeNames = on) }
+                }
+
+                Column {
+                    Text("Sposób podróży")
+                    Text(
+                        "trasy po drogach dla wybranego środka; skoki od 700 km i miejsca bez drogi to lot",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (mode in TravelMode.entries) {
+                            FilterChip(
+                                selected = cfg.travelMode == mode,
+                                onClick = { vm.updateConfig { it.copy(travelMode = mode) } },
+                                label = { Text(mode.label) },
+                            )
+                        }
+                    }
                 }
 
                 SliderRow("Maks. długość filmu", cfg.maxVideoSec, 3f..60f, "s") {

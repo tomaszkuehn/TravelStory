@@ -2,6 +2,7 @@ package com.travel.slideshow.data
 
 import android.content.Context
 import com.travel.slideshow.data.geo.Geo
+import com.travel.slideshow.model.TravelMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -17,11 +18,20 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** A leg between two photos as [lon, lat] points: a road route, or a flight arc. */
-data class Route(val points: List<List<Double>>, val flight: Boolean)
+/**
+ * A leg between two photos as [lon, lat] points: a road route, or a flight arc.
+ * [head]/[tail]: off-road bits from the photo to where the road starts / from where it ends (empty when on it).
+ */
+data class Route(
+    val points: List<List<Double>>,
+    val flight: Boolean,
+    val head: List<List<Double>> = emptyList(),
+    val tail: List<List<Double>> = emptyList(),
+)
 
 /**
- * Road routes from the public OSRM server, cached on disk (one file per leg in `files/routes/`).
+ * Road routes from public OSRM servers (car: project-osrm.org, bike/foot: routing.openstreetmap.de),
+ * simplified and cached on disk (one file per leg and travel mode in `files/routes/`).
  * Long hops, and places OSRM cannot connect by road (islands, other continents), become a flight arc.
  * Respects the demo server policy: one request per second, identifying User-Agent.
  */
@@ -32,18 +42,30 @@ class RouteResolver(context: Context) {
     private var lastRequestAt = 0L
 
     /** The leg from 1 to 2; null when OSRM could not be asked (offline, rate limit) — not cached, retried later. */
-    suspend fun resolve(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Route? = lock.withLock {
+    suspend fun resolve(mode: TravelMode, lat1: Double, lon1: Double, lat2: Double, lon2: Double): Route? = lock.withLock {
         if (Geo.haversineKm(lat1, lon1, lat2, lon2) >= FLIGHT_KM) return@withLock flightArc(lat1, lon1, lat2, lon2)
-        val file = File(dir, fileName(lat1, lon1, lat2, lon2))
-        withContext(Dispatchers.IO) { read(file) }?.let { road ->
-            return@withLock if (road.isEmpty()) flightArc(lat1, lon1, lat2, lon2) else Route(road, false)
+        val file = File(dir, fileName(mode, lat1, lon1, lat2, lon2))
+        // Simplifying again on read also slims legs cached in full by older versions.
+        val road = withContext(Dispatchers.IO) { read(file)?.let(::simplify) } ?: run {
+            val wait = MIN_INTERVAL_MS - (System.currentTimeMillis() - lastRequestAt)
+            if (wait > 0) delay(wait)
+            lastRequestAt = System.currentTimeMillis()
+            val fetched = withContext(Dispatchers.IO) { fetch(mode, lat1, lon1, lat2, lon2) } ?: return@withLock null
+            simplify(fetched).also { withContext(Dispatchers.IO) { write(file, it) } }
         }
-        val wait = MIN_INTERVAL_MS - (System.currentTimeMillis() - lastRequestAt)
-        if (wait > 0) delay(wait)
-        lastRequestAt = System.currentTimeMillis()
-        val road = withContext(Dispatchers.IO) { fetch(lat1, lon1, lat2, lon2) } ?: return@withLock null
-        withContext(Dispatchers.IO) { write(file, road) }
-        if (road.isEmpty()) flightArc(lat1, lon1, lat2, lon2) else Route(road, false)
+        if (road.isEmpty()) flightArc(lat1, lon1, lat2, lon2) else roadRoute(road, lat1, lon1, lat2, lon2)
+    }
+
+    private fun roadRoute(road: List<List<Double>>, lat1: Double, lon1: Double, lat2: Double, lon2: Double): Route {
+        val first = road.first()
+        val last = road.last()
+        val head = if (Geo.haversineKm(lat1, lon1, first[1], first[0]) * 1000 > OFF_ROAD_M) {
+            listOf(listOf(lon1, lat1), first)
+        } else emptyList()
+        val tail = if (Geo.haversineKm(last[1], last[0], lat2, lon2) * 1000 > OFF_ROAD_M) {
+            listOf(last, listOf(lon2, lat2))
+        } else emptyList()
+        return Route(road, false, head, tail)
     }
 
     /** Cached road points; an empty list marks "no road here, fly". Null when never asked. */
@@ -69,12 +91,17 @@ class RouteResolver(context: Context) {
     }
 
     /** Road points; empty when there is no sensible road between the two; null on a network failure. */
-    private fun fetch(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
+    private fun fetch(mode: TravelMode, lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
         return try {
+            val base = when (mode) {
+                TravelMode.CAR -> "https://router.project-osrm.org/route/v1/driving/"
+                TravelMode.BIKE -> "https://routing.openstreetmap.de/routed-bike/route/v1/driving/"
+                TravelMode.FOOT -> "https://routing.openstreetmap.de/routed-foot/route/v1/driving/"
+            }
             val url = java.net.URL(
-                String.format(
+                base + String.format(
                     Locale.US,
-                    "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson",
+                    "%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson",
                     lon1, lat1, lon2, lat2,
                 )
             )
@@ -121,13 +148,59 @@ class RouteResolver(context: Context) {
         }
     }
 
-    private fun fileName(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
-        String.format(Locale.US, "%.5f_%.5f_%.5f_%.5f.txt", lat1, lon1, lat2, lon2)
+    // Car legs keep the unprefixed names they were first cached under.
+    private fun fileName(mode: TravelMode, lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
+        (if (mode == TravelMode.CAR) "" else mode.name.lowercase() + "_") +
+            String.format(Locale.US, "%.5f_%.5f_%.5f_%.5f.txt", lat1, lon1, lat2, lon2)
+
+    /**
+     * Douglas-Peucker with a tolerance well under a pixel at the leg's travel zoom: the shape stays,
+     * but a long drive drops from thousands of points to a few hundred.
+     */
+    private fun simplify(pts: List<List<Double>>): List<List<Double>> {
+        if (pts.size < 3) return pts
+        var w = 180.0; var e = -180.0; var s = 90.0; var n = -90.0
+        for (p in pts) { w = minOf(w, p[0]); e = maxOf(e, p[0]); s = minOf(s, p[1]); n = maxOf(n, p[1]) }
+        val k = cos(Math.toRadians((s + n) / 2))
+        val wx = (e - w) * k
+        val diag = sqrt(wx * wx + (n - s) * (n - s))
+        val eps = (diag * SIMPLIFY_FRACTION).coerceAtLeast(SIMPLIFY_MIN_DEG)
+        val keep = BooleanArray(pts.size)
+        keep[0] = true
+        keep[pts.size - 1] = true
+        val stack = ArrayDeque<IntArray>()
+        stack.addLast(intArrayOf(0, pts.size - 1))
+        while (stack.isNotEmpty()) {
+            val (from, to) = stack.removeLast()
+            val ax = pts[from][0] * k; val ay = pts[from][1]
+            val dx = pts[to][0] * k - ax; val dy = pts[to][1] - ay
+            val len2 = dx * dx + dy * dy
+            var maxD = 0.0
+            var maxI = -1
+            for (i in from + 1 until to) {
+                val px = pts[i][0] * k; val py = pts[i][1]
+                val t = if (len2 == 0.0) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
+                val qx = ax + dx * t - px; val qy = ay + dy * t - py
+                val d = qx * qx + qy * qy
+                if (d > maxD) { maxD = d; maxI = i }
+            }
+            if (maxI >= 0 && maxD > eps * eps) {
+                keep[maxI] = true
+                stack.addLast(intArrayOf(from, maxI))
+                stack.addLast(intArrayOf(maxI, to))
+            }
+        }
+        return pts.filterIndexed { i, _ -> keep[i] }
+    }
 
     companion object {
         /** Hops at least this long are drawn as flights without asking for a road. */
         const val FLIGHT_KM = 700.0
         private const val MAX_SNAP_M = 20_000.0
+        /** Gap between the photo and the road worth drawing as a dashed off-road bit. */
+        private const val OFF_ROAD_M = 30.0
+        private const val SIMPLIFY_FRACTION = 0.0004
+        private const val SIMPLIFY_MIN_DEG = 0.00003
         private const val DETOUR_MIN_KM = 100.0
         private const val MAX_DETOUR = 2.5
         private const val MIN_INTERVAL_MS = 1100L
