@@ -173,10 +173,10 @@ fun SlideshowScreen(vm: ShowViewModel) {
             if (mapUnder != null && showMapLayer) {
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = mapAlpha.value }) {
                     val rm = mapUnder as? ShowStep.RouteMap
-                    val routePts = st.route?.takeIf { rm != null && it.uri == rm.photo.uri }?.points
+                    val route = st.route?.takeIf { rm != null && it.uri == rm.photo.uri }
                     ShowMap(
                         mapUnder,
-                        routePts,
+                        route,
                         st.pastRoutes,
                         st.visitedPins,
                         st.config.locationMapSec,

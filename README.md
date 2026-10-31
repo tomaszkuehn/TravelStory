@@ -10,7 +10,7 @@ Aplikacja Android do prezentowania zdjęć i krótkich filmów z podróży na ta
   - to samo państwo, ale odległość od poprzedniego zdjęcia z GPS ≥ próg (domyślnie 5 km) → mapa lokalizacji,
   - odległość < próg lub brak GPS → samo zdjęcie (bez mapy).
 - **Muzyka wg państwa** (hybryda): własne pliki z wybranego folderu (podfoldery np. `PL`/`POL`/`Poland`, `US`/`USA`, lub `_default` — patrz [Struktura muzyki](#struktura-muzyki)) — start i każda zmiana państwa zaczynają od **losowego utworu** (playlista tasowana przy każdym uruchomieniu); gdy brak plików, generowany jest instrumentalny podkład ambietowy (proceduralny WAV, unikatowy dla państwa).
-- **Trasa między zdjęciami**: gdy oba zdjęcia mają GPS i odległość ≥ próg z ustawień (domyślnie 5 km) → sekwencja: powrót na mapę wycentrowaną na punkcie (ten sam zoom co przy dotarciu, krótki chwyt) → płynny **zoom-out przy stałym środku na punkcie** (docelowy zoom zależny od długości trasy — stała prędkość przeglądu) → **rysowanie trasy drogowej** wyznaczanej przez [OSRM](https://router.project-osrm.org) (fallback: linia prosta bez internetu) z symbolem samolotu na czubku linii skierowanym zgodnie z kierunkiem, mapa podąża za czubkiem → po dotarciu **czerwona pinezka** na miejscu docelowym → przybliżenie na cel. Fazy przyspieszane tak, aby zawsze domknąć się w skonfigurowanym czasie mapy. Trasa pobierana z wyprzedzeniem, by nie czekać na OSRM w momencie przejścia.
+- **Trasa między zdjęciami**: gdy oba zdjęcia mają GPS i odległość ≥ próg z ustawień (domyślnie 5 km) → sekwencja: mapa od razu (bez animacji oddalania) w **zoomie zależnym od długości trasy**, wycentrowana na punkcie startu — stała prędkość przeglądu, mapa podąża za czubkiem linii → **rysowanie trasy drogowej** wyznaczanej przez [OSRM](https://router.project-osrm.org) (cache na dysku) albo **przerywanego łuku lotu** — dla skoków ≥ 700 km i tam, gdzie nie ma sensownej drogi (wyspy, inne kontynenty, objazd > 2,5× dłuższy niż w linii prostej); bez internetu łuk zastępczo, a trasa pobierana ponownie po 30 s — z symbolem samolotu na czubku linii skierowanym zgodnie z kierunkiem → po dotarciu **czerwona pinezka** na miejscu docelowym → przybliżenie na cel. Fazy przyspieszane tak, aby zawsze domknąć się w skonfigurowanym czasie mapy. Trasa pobierana z wyprzedzeniem, by nie czekać na OSRM w momencie przejścia.
 - **Pinezki odwiedzonych punktów**: czerwone pinezki z lądowań (i lokalizacji nowych państw) zostają na mapie przez cały pokaz — ślad podróży; wcześniej narysowane trasy też zostają (ta sama linia i kolor).
 - **Przejście mapa↔zdjęcie**: płynny crossfade (czas regulowany w ustawieniach, 0.2–5 s).
 - **Sterowanie**: tap = pauza/wznowienie (obsługiwany też na mapie i zdjęciu; na zdjęciu podwójne tapnięcie resetuje powiększenie), pasek dolny: ▶/⏸, ⏭ następne, ⏮ poprzednie, ⏪/⏩ poprzedni/następny dzień (skok do planszy dnia lub map prowadzących do jego pierwszego zdjęcia), replay bieżącego państwa, restart całości, ustawienia. Przesunięcie w lewo na zdjęciu = następne, w prawo = poprzednie; cofanie najpierw powtarza blok map danego zdjęcia (mapa lokalizacji/trasa/wstęp państwa), a dopiero potem wraca do poprzedniego zdjęcia. Ustawienia dostępne zawsze (ikona w prawym górnym rogu).
@@ -27,7 +27,7 @@ Aplikacja Android do prezentowania zdjęć i krótkich filmów z podróży na ta
 ## Wymagania
 
 - Android 9+ (API 28+); rozmycie tła wąskich zdjęć od Androida 12.
-- Internet: kafelki map OSM, trasy OSRM i nazwy miejsc Nominatim (zapamiętywane w cache). Granice państw są wbudowane w aplikację; bez sieci pokaz działa z linią prostą zamiast trasy i bez nowych nazw miejsc.
+- Internet: kafelki map OSM, trasy OSRM i nazwy miejsc Nominatim (zapamiętywane w cache). Granice państw są wbudowane w aplikację; bez sieci pokaz działa z łukiem zamiast niepobranych tras i bez nowych nazw miejsc.
 - Budowanie: Android Studio (Gradle 8.10.2, AGP 8.7.3, Kotlin 2.0.21, JDK 17/21) lub `gradlew.bat :app:assembleDebug`.
 
 ## Struktura muzyki
@@ -59,4 +59,5 @@ Podgląd map podczas pokazu jest animowany; mapę można ręcznie przeglądać, 
 - Filmy: `androidx.media3` (ExoPlayer + PlayerView), metadane przez `MediaMetadataRetriever`.
 - Zdjęcia w UI: Coil; efekt Ken Burns i zoom gestami przez `graphicsLayer`.
 - Nazwy miejsc: `PlaceResolver` — Nominatim reverse (`zoom=10`, `accept-language=pl`), limit 1 zapytanie/s, własny User-Agent, cache `files/places.json` (także wyniki „brak nazwy”).
+- Trasy: `RouteResolver` — OSRM `driving` (`overview=full`), limit 1 zapytanie/s, cache `files/routes/` (plik na odcinek, także decyzja „brak drogi”); łuk lotu = ortodroma z lekkim wygięciem ku biegunowi; błędy sieci/429 nie są zapamiętywane.
 - Plansze dni: dzień liczony z czasu lokalnego zdjęcia; nowa numeracja po przerwie > 3 dni.

@@ -9,6 +9,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.travel.slideshow.data.PhotoRepository
 import com.travel.slideshow.data.PlaceResolver
+import com.travel.slideshow.data.Route
+import com.travel.slideshow.data.RouteResolver
 import com.travel.slideshow.data.geo.CountryInfo
 import com.travel.slideshow.data.geo.CountryShape
 import com.travel.slideshow.data.geo.Geo
@@ -56,7 +58,10 @@ fun placeOf(photo: PhotoItem?, names: Map<String, String>): String? {
     return names[PlaceResolver.key(lat, lon)]
 }
 
-data class RouteState(val uri: Uri, val points: List<List<Double>>)
+/** [flight]: drawn as a dashed arc (long hop or no road connection) instead of a road. */
+data class RouteState(val uri: Uri, val points: List<List<Double>>, val flight: Boolean = false)
+
+private fun Route.toState(uri: Uri) = RouteState(uri, points, flight)
 
 data class PinState(val lat: Double, val lon: Double, val title: String? = null)
 
@@ -90,6 +95,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private val musicPlayer = MusicPlayer(app)
     private val musicResolver = MusicResolver(app)
     private val places = PlaceResolver(app)
+    private val routeResolver = RouteResolver(app)
     private var geocodeJob: Job? = null
 
     private val _state = MutableStateFlow(UiState(config = loadConfig()))
@@ -114,8 +120,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     private var musicJob: Job? = null
     private var currentMusicIso: String? = null
     // Touched only on the main thread; network work hops to IO and back.
-    private val routeCache = HashMap<String, List<List<Double>>>()
+    private val routeCache = HashMap<String, Route>()
     private val routeInFlight = HashSet<String>()
+    // Legs drawn without OSRM's answer (offline, rate limit): when to ask again.
+    private val routeRetryAt = HashMap<String, Long>()
 
     init {
         musicRoot = prefs.getString(PREF_MUSIC_ROOT, null)?.toUriOrNull()
@@ -544,7 +552,10 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         for (i in 0 until travelSteps.size) {
             segs += travelSteps[i]
             segs += photoSegs[i]
-            if (i + 1 < travelSteps.size && anchors[i] != null && travelSteps[i + 1].isNotEmpty()) {
+            // A route goes straight from the photo to the journey; other map blocks get a short revisit first.
+            if (i + 1 < travelSteps.size && anchors[i] != null && travelSteps[i + 1].isNotEmpty() &&
+                travelSteps[i + 1].first().step !is ShowStep.RouteMap
+            ) {
                 segs += Segment(ShowStep.LocationMap(anchors[i]!!, revisit = true), revisitMs)
             }
         }
@@ -626,7 +637,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun routeKey(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String =
-        "%.5f,%.5f|%.5f,%.5f".format(lat1, lon1, lat2, lon2)
+        String.format(java.util.Locale.US, "%.5f,%.5f|%.5f,%.5f", lat1, lon1, lat2, lon2)
 
     private fun routeKey(step: ShowStep.RouteMap): String? {
         val from = step.from
@@ -642,23 +653,34 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         val key = routeKey(stepIn) ?: return
         val cached = routeCache[key]
         if (cached != null) {
-            _state.update { it.copy(route = RouteState(to.uri, cached)) }
-            return
+            _state.update { it.copy(route = cached.toState(to.uri)) }
+            val retryAt = routeRetryAt[key] ?: return
+            if (System.currentTimeMillis() < retryAt) return
         }
         if (!routeInFlight.add(key)) return
         viewModelScope.launch {
-            val pts = withContext(Dispatchers.IO) { osrmRoute(from.lat!!, from.lon!!, to.lat!!, to.lon!!) }
-                ?: listOf(listOf(from.lon!!, from.lat!!), listOf(to.lon!!, to.lat!!))
+            val fetched = routeResolver.resolve(from.lat!!, from.lon!!, to.lat!!, to.lon!!)
             routeInFlight.remove(key)
-            routeCache[key] = pts
-            _state.update { it.copy(route = RouteState(to.uri, pts)) }
+            if (fetched == null) routeRetryAt[key] = System.currentTimeMillis() + ROUTE_RETRY_MS
+            else routeRetryAt.remove(key)
+            // Offline: an arc stands in for the road until a retry gets the real one.
+            val route = fetched ?: cached ?: RouteResolver.flightArc(from.lat, from.lon, to.lat, to.lon)
+            if (route == cached) return@launch
+            routeCache[key] = route
+            val st = route.toState(to.uri)
+            _state.update { cur ->
+                cur.copy(
+                    route = st,
+                    pastRoutes = cur.pastRoutes.map { if (it.uri == to.uri) st else it },
+                )
+            }
         }
     }
 
-    private fun addPastRoute(uri: Uri, pts: List<List<Double>>) {
+    private fun addPastRoute(uri: Uri, route: Route) {
         _state.update { cur ->
             if (cur.pastRoutes.any { it.uri == uri } || uri in pastRoutesSet) cur
-            else cur.copy(pastRoutes = cur.pastRoutes + RouteState(uri, pts))
+            else cur.copy(pastRoutes = cur.pastRoutes + route.toState(uri))
         }
         pastRoutesSet.add(uri)
     }
@@ -704,8 +726,8 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
             val photo = when (val st = segments[i].step) {
                 is ShowStep.LocationMap -> st.photo
                 is ShowStep.RouteMap -> {
-                    routeKey(st)?.let { routeCache[it] }?.let { pts ->
-                        if (pastRoutesSet.add(st.photo.uri)) routes += RouteState(st.photo.uri, pts)
+                    routeKey(st)?.let { routeCache[it] }?.let { r ->
+                        if (pastRoutesSet.add(st.photo.uri)) routes += r.toState(st.photo.uri)
                     }
                     st.photo
                 }
@@ -735,34 +757,6 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
         musicJob = null
         currentMusicIso = null
         musicPlayer.stop()
-    }
-
-    private fun osrmRoute(lat1: Double, lon1: Double, lat2: Double, lon2: Double): List<List<Double>>? {
-        return try {
-            val url = java.net.URL(
-                "https://router.project-osrm.org/route/v1/driving/" +
-                    "%.6f,%.6f;%.6f,%.6f?overview=full&geometries=geojson"
-                    .format(lon1, lat1, lon2, lat2)
-            )
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
-            conn.setRequestProperty("User-Agent", "TravelSlideshow/1.0")
-            val body = conn.inputStream.use { it.readBytes().decodeToString() }
-            conn.disconnect()
-            val root = JSONObject(body)
-            val routes = root.optJSONArray("routes") ?: return null
-            if (routes.length() == 0) return null
-            val coords = routes.getJSONObject(0).getJSONObject("geometry").getJSONArray("coordinates")
-            val out = mutableListOf<List<Double>>()
-            for (i in 0 until coords.length()) {
-                val c = coords.getJSONArray(i)
-                out.add(listOf(c.getDouble(0), c.getDouble(1)))
-            }
-            if (out.size < 2) null else out
-        } catch (e: Exception) {
-            null
-        }
     }
 
     private fun relaunch(syncMusic: Boolean = false) {
@@ -859,6 +853,7 @@ class ShowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        private const val ROUTE_RETRY_MS = 30_000L
         private const val PREF_PHOTO_ROOT = "photo_root"
         private const val PREF_MUSIC_ROOT = "music_root"
         private const val PREF_PHOTO_SEC = "photo_sec"

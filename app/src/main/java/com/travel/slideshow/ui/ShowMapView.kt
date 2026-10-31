@@ -38,7 +38,7 @@ import org.osmdroid.views.overlay.Polyline
 @Composable
 fun ShowMap(
     step: ShowStep,
-    routePts: List<List<Double>>?,
+    route: RouteState?,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
     totalSec: Float,
@@ -52,7 +52,7 @@ fun ShowMap(
     // The effect restarts when the OSRM route arrives, but elapsed time is measured from the
     // start of the step so the route animation still fits the segment.
     val key: Any = when (step) {
-        is ShowStep.RouteMap -> listOf(step, routePts?.size ?: -1)
+        is ShowStep.RouteMap -> listOf(step, route?.points?.size ?: -1, route?.flight)
         else -> step
     }
     SingleMapView(key, step, onMapTap, onGesture, manual, modifier) { mv, elapsedMs ->
@@ -61,7 +61,7 @@ fun ShowMap(
             is ShowStep.LocationMap -> drawLocation(mv, step, pastRoutes, visitedPins, manual, { onArrived(step) })
             is ShowStep.RouteMap ->
                 drawRoute(
-                    mv, step, routePts, pastRoutes, visitedPins, totalSec, elapsedMs, manual,
+                    mv, step, route, pastRoutes, visitedPins, totalSec, elapsedMs, manual,
                     { onArrived(step) }
                 )
             else -> {}
@@ -239,14 +239,21 @@ private fun addPastRouteLines(mapView: MapView, pastRoutes: List<RouteState>, sk
     for (past in pastRoutes) {
         if (past.uri == skipUri) continue
         if (past.points.size < 2) continue
-        val line = Polyline(mapView)
+        val line = routeLine(mapView, past.flight)
         line.setPoints(past.points.map { GeoPoint(it[1], it[0]) })
-        line.outlinePaint.color = 0xFF29B6F6.toInt()
-        line.outlinePaint.strokeWidth = 6.0f
-        line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-        line.outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
         mapView.overlays.add(line)
     }
+}
+
+/** Road legs are solid; flights (long hops, no road connection) are dashed. */
+private fun routeLine(mapView: MapView, flight: Boolean): Polyline {
+    val line = Polyline(mapView)
+    line.outlinePaint.color = 0xFF29B6F6.toInt()
+    line.outlinePaint.strokeWidth = 6.0f
+    line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+    line.outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+    if (flight) line.outlinePaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(18f, 14f), 0f)
+    return line
 }
 
 private fun addVisitedPins(mapView: MapView, pins: List<PinState>) {
@@ -328,7 +335,7 @@ private suspend fun animateZoomDecel(
 private suspend fun drawRoute(
     mapView: MapView,
     step: ShowStep.RouteMap,
-    routePts: List<List<Double>>?,
+    route: RouteState?,
     pastRoutes: List<RouteState>,
     visitedPins: List<PinState>,
     totalSec: Float,
@@ -350,14 +357,10 @@ private suspend fun drawRoute(
         visitedPins.filterNot { (it.lat == aLat && it.lon == aLon) || (it.lat == bLat && it.lon == bLon) }
     )
 
-    val full = (routePts ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
+    val full = (route?.points ?: listOf(listOf(aLon, aLat), listOf(bLon, bLat)))
         .map { GeoPoint(it[1], it[0]) }
-    val line = Polyline(mapView)
+    val line = routeLine(mapView, route?.flight == true)
     line.setPoints(listOf(full.first()))
-    line.outlinePaint.color = 0xFF29B6F6.toInt()
-    line.outlinePaint.strokeWidth = 6.0f
-    line.outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-    line.outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
     mapView.overlays.add(line)
 
     mapView.overlays.add(
@@ -378,38 +381,33 @@ private suspend fun drawRoute(
     }
     val bb = BoundingBox(n, e, s, w)
 
+    // The map opens straight at the leg's travel zoom (no zoom-out first), centered on the start;
+    // the zoom scales with the leg so the tip crosses the screen at the same pace on every leg.
+    // While the route is still loading, the straight line between the two photos sets the zoom.
     val startGeo = GeoPoint(aLat, aLon)
-    mapView.controller.setZoom(15.5)
-    mapView.controller.setCenter(startGeo)
-    mapView.invalidate()
+    if (!manual()) {
+        mapView.visibility = android.view.View.INVISIBLE
+        mapView.zoomToBoundingBox(bb, false, 120)
+        mapView.controller.setZoom((mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 15.5))
+        mapView.controller.setCenter(startGeo)
+        mapView.visibility = android.view.View.VISIBLE
+        mapView.invalidate()
+    }
     waitManualHeld(manual)
-    if (routePts == null) return
-
-    mapView.visibility = android.view.View.INVISIBLE
-    mapView.zoomToBoundingBox(bb, false, 120)
-    val fitZoom = (mapView.zoomLevelDouble - 0.2).coerceIn(3.0, 15.5)
-    mapView.controller.setZoom(15.5)
-    mapView.controller.setCenter(startGeo)
-    mapView.visibility = android.view.View.VISIBLE
-    mapView.invalidate()
+    if (route == null) return
 
     val totalMs = (totalSec * 1000).toLong().coerceAtLeast(2500)
     val elapsed = elapsedMs.coerceAtLeast(0)
     val remaining = (totalMs - elapsed).coerceAtLeast(400)
-    val dz = (15.5 - fitZoom).coerceAtLeast(0.0)
-    val zoomOutMs = ((remaining * 0.2) * (dz / 5.0).coerceIn(0.6, 1.6)).coerceIn(500.0, 3200.0).toLong()
     val zoomInMs = (remaining * 0.28).coerceIn(500.0, 2600.0).toLong()
-    val holdMs = minOf(300L, remaining / 6)
-    val drawMs = (remaining - holdMs - zoomOutMs - zoomInMs).coerceAtLeast(0)
+    val holdMs = minOf(500L, remaining / 6)
+    val drawMs = (remaining - holdMs - zoomInMs).coerceAtLeast(0)
 
     val plane = AirplaneTipOverlay()
     mapView.overlays.add(plane)
     kotlinx.coroutines.delay(holdMs)
 
     if (full.size >= 2) {
-        if (dz > 0.01) {
-            animateZoomDecel(mapView, startGeo, fitZoom, zoomOutMs, manual)
-        }
         val steps = (drawMs / 40).coerceIn(4L, 900L)
         for (i in 1..steps) {
             val t = i.toDouble() / steps
